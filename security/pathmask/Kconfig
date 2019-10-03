@@ -1,0 +1,6 @@
+config SECURITY_PATHMASK
+	bool "Confine the file paths available to processes"
+	depends on SECURITY
+	help
+	  This lets processes confine themselves into a subset of
+	  available file paths.
