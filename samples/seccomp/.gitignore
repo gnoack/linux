@@ -1,4 +1,5 @@
 bpf-direct
 bpf-fancy
 dropper
+pathmask
 user-trap

@@ -12,6 +12,8 @@
  * Mode 1 uses a fixed list of allowed system calls.
  * Mode 2 allows user-defined system call filters in the form
  *        of Berkeley Packet Filters/Linux Socket Filters.
+ * Mode 3 allows to filter accessible file paths, when the
+ *        pathmask LSM is enabled.
  */
 
 #include <linux/refcount.h>
@@ -20,6 +22,7 @@
 #include <linux/coredump.h>
 #include <linux/kmemleak.h>
 #include <linux/nospec.h>
+#include <linux/pathmask.h>
 #include <linux/prctl.h>
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
@@ -227,7 +230,7 @@ static int seccomp_check_filter(struct sock_filter *filter, unsigned int flen)
 		case BPF_JMP | BPF_JA:
 		case BPF_JMP | BPF_JEQ | BPF_K:
 		case BPF_JMP | BPF_JEQ | BPF_X:
-		case BPF_JMP | BPF_JGE | BPF_K:
+ case BPF_JMP | BPF_JGE | BPF_K:
 		case BPF_JMP | BPF_JGE | BPF_X:
 		case BPF_JMP | BPF_JGT | BPF_K:
 		case BPF_JMP | BPF_JGT | BPF_X:
@@ -1397,6 +1400,11 @@ static long do_seccomp(unsigned int op, unsigned int flags,
 			return -EINVAL;
 
 		return seccomp_get_notif_sizes(uargs);
+	case SECCOMP_SET_PATH_MASK:
+		if (flags != 0)
+			return -EINVAL;
+
+		return pathmask_set_path_mask(uargs);
 	default:
 		return -EINVAL;
 	}

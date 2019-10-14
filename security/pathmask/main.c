@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 
 #include <linux/dcache.h>
-#include <linux/lsm_hooks.h>
 #include <linux/fs_struct.h>
+#include <linux/lsm_hooks.h>
+#include <linux/namei.h>
+#include <linux/pathmask.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/namei.h>
 
 #include "include/types.h"
 
@@ -55,7 +56,7 @@ static int pm_file_open(struct file *file)
 	 * when the user tries to access the file bogus2000.
 	 */
 	if (!strncmp(dentry->d_name.name, "bogus2000", 9)) {
-		struct dentry* dentries[3];
+		struct dentry *dentries[3];
 		struct path path;
 		int rc;
 
@@ -92,6 +93,56 @@ static int pm_file_open(struct file *file)
 static void pm_task_free(struct task_struct *task)
 {
 	pm_free_dentry_set(task_ctx(task)->ctx_paths);
+}
+
+/* ------------ */
+
+int pathmask_set_path_mask(const char __user* const __user *paths) {
+	// TODO: Remove the pr_info calls before commit.
+	const char __user *user_path;
+	struct path path;
+	int rc;
+	size_t size, capacity;
+	struct dentry **dentries;
+
+	// TODO(gnoack): Maybe this should grow rather than returning -E2BIG.
+	size = 0;
+	capacity = 128;
+	dentries = kmalloc_array(capacity, sizeof(struct dentry*), GFP_KERNEL);
+
+	while (size < capacity) {
+		if (get_user(user_path, paths++)) {
+			pr_info("get_user failed");
+			rc = -EINVAL;
+			goto out;
+		}
+
+		if (!user_path)
+			break;  /* reached null pointer */
+
+		// XXX: Use path_init and friends?
+		rc = user_path_at_empty(AT_FDCWD, user_path, LOOKUP_FOLLOW, &path, NULL);
+		if (rc) {
+			pr_info("user_path_at_empty failed");
+			goto out;
+		}
+
+		pr_info("LSM: path[%d] = \"%pd\"", size, path.dentry);
+		dentries[size++] = path.dentry;
+	};
+
+	if (size >= capacity) {
+		pr_info("over capacity");
+		rc = -E2BIG;
+		goto out;
+	}
+
+	pr_info("LSM: confining");
+	rc = pm_confine_path(current, size, dentries);
+
+out:
+	kfree(dentries);
+	return rc;
 }
 
 /* ------------ */
