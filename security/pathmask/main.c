@@ -19,6 +19,24 @@ static inline struct pm_task_ctx *task_ctx(struct task_struct *task)
 	return task->security + pm_blob_sizes.lbs_task;
 }
 
+static int pm_task_ctx_copy(struct pm_task_ctx *dest, struct pm_task_ctx *src)
+{
+	struct pm_dentry_set *ctx_paths;
+
+	if (!src->is_locked_down)
+		return 0;
+
+	dest->is_locked_down = src->is_locked_down;
+
+	ctx_paths = pm_dup_dentry_set(src->ctx_paths);
+	if (IS_ERR(ctx_paths))
+		return PTR_ERR(ctx_paths);
+
+
+	dest->ctx_paths = ctx_paths;
+	return 0;
+}
+
 /* ------------ */
 
 /* Confine a task to a given list of paths that it can subsequently access. */
@@ -40,6 +58,7 @@ static int pm_confine_path(struct task_struct *task, size_t count, struct dentry
 
 	/* Swizzle out. */
 	ctx->ctx_paths = whitelist;
+	ctx->is_locked_down = true;
 	return 0;
 }
 
@@ -47,47 +66,17 @@ static int pm_confine_path(struct task_struct *task, size_t count, struct dentry
 
 static int pm_file_open(struct file *file)
 {
-	struct dentry *dentry;
-
-	dentry = file_dentry(file);
-
-	/*
-	 * TODO: This is a hack; we enforce a sample set of paths
-	 * when the user tries to access the file bogus2000.
-	 */
-	if (!strncmp(dentry->d_name.name, "bogus2000", 9)) {
-		struct dentry *dentries[3];
-		struct path path;
-		int rc;
-
-		rc = kern_path("/bin", LOOKUP_FOLLOW, &path);
-		if (rc) {
-			pr_info("LSM: Could not look up /bin, rc=%d", rc);
-			return 0;
-		}
-		dentries[0] = path.dentry;
-
-		rc = kern_path("/lib", LOOKUP_FOLLOW, &path);
-		if (rc) return 0;
-		dentries[1] = path.dentry;
-
-		rc = kern_path("/root", LOOKUP_FOLLOW, &path);
-		if (rc) return 0;
-		dentries[2] = path.dentry;
-
-		/* Actually lock down the process. */
-		rc = pm_confine_path(current, 3, dentries);
-		if (rc) {
-			pr_info("LSM: Could not confine.");
-			return rc;
-		}
-		pr_info("LSM: Process %d confined to /bin, /lib, /root.", current->pid);
-	}
-
-	if (!pm_is_whitelisted(task_ctx(current)->ctx_paths, dentry)) {
+	if (!pm_is_whitelisted(task_ctx(current)->ctx_paths, file_dentry(file))) {
 		return -EACCES;
 	}
 	return 0;
+}
+
+static int pm_task_alloc(struct task_struct *task, unsigned long clone_flags)
+{
+	pr_debug("LSM: task_ctx_copy when forking %d", current->pid);
+
+	return pm_task_ctx_copy(task_ctx(task), task_ctx(current));
 }
 
 static void pm_task_free(struct task_struct *task)
@@ -112,7 +101,7 @@ int pathmask_set_path_mask(const char __user* const __user *paths) {
 
 	while (size < capacity) {
 		if (get_user(user_path, paths++)) {
-			pr_info("get_user failed");
+			pr_debug("get_user failed");
 			rc = -EINVAL;
 			goto out;
 		}
@@ -123,21 +112,21 @@ int pathmask_set_path_mask(const char __user* const __user *paths) {
 		// XXX: Use path_init and friends?
 		rc = user_path_at_empty(AT_FDCWD, user_path, LOOKUP_FOLLOW, &path, NULL);
 		if (rc) {
-			pr_info("user_path_at_empty failed");
+			pr_debug("user_path_at_empty failed");
 			goto out;
 		}
 
-		pr_info("LSM: path[%d] = \"%pd\"", size, path.dentry);
+		pr_debug("LSM: path[%zu] = \"%pd\"", size, path.dentry);
 		dentries[size++] = path.dentry;
 	};
 
 	if (size >= capacity) {
-		pr_info("over capacity");
+		pr_debug("over capacity");
 		rc = -E2BIG;
 		goto out;
 	}
 
-	pr_info("LSM: confining");
+	pr_debug("LSM: confining %d", current->pid);
 	rc = pm_confine_path(current, size, dentries);
 
 out:
@@ -149,6 +138,7 @@ out:
 
 static struct security_hook_list pm_hooks[] __lsm_ro_after_init = {
 	LSM_HOOK_INIT(file_open, pm_file_open),
+	LSM_HOOK_INIT(task_alloc, pm_task_alloc),
 	LSM_HOOK_INIT(task_free, pm_task_free),
 };
 

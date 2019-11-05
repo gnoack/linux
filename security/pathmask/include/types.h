@@ -23,6 +23,7 @@ struct pm_dentry_set {
 extern struct pm_dentry_set *pm_make_dentry_set(size_t size, struct dentry **dentries);
 extern bool pm_dentry_set_contains(struct pm_dentry_set *set, struct dentry *dentry);
 extern void pm_free_dentry_set(struct pm_dentry_set *set);
+extern struct pm_dentry_set *pm_dup_dentry_set(struct pm_dentry_set *set);
 
 /* Checks whether the dentry or any of its parent dentries are in the whitelist set. */
 extern bool pm_is_whitelisted(struct pm_dentry_set *whitelist, struct dentry *dentry);

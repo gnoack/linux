@@ -2,6 +2,7 @@
 
 #include <linux/dcache.h>
 #include <linux/slab.h>
+#include <linux/sched.h>
 
 #include "include/types.h"
 
@@ -27,6 +28,11 @@ struct pm_dentry_set *pm_make_dentry_set(size_t size, struct dentry **dentries)
 	return set;
 }
 
+struct pm_dentry_set *pm_dup_dentry_set(struct pm_dentry_set *set)
+{
+	return pm_make_dentry_set(set->size, set->dentries);
+}
+
 bool pm_dentry_set_contains(struct pm_dentry_set *set, struct dentry *dentry)
 {
 	int i;
@@ -49,15 +55,15 @@ bool pm_is_whitelisted(struct pm_dentry_set *whitelist, struct dentry *dentry)
 
 	/* Walk the dentry upwards until you find something from the set */
 	while (!IS_ROOT(dentry)) {
-		pr_info("LSM: Checking dentry %pd", dentry);
+		pr_debug("LSM: [pid %d] Checking dentry %pd", current->pid, dentry);
 		if (pm_dentry_set_contains(whitelist, dentry)) {
-			pr_info("LSM: OK");
+			pr_debug("LSM: [pid %d] OK", current->pid);
 			return true;
 		}
 
 		dentry = dentry->d_parent;
 	}
-	pr_info("LSM: fail");
+	pr_debug("LSM: [pid %d] fail", current->pid);
 	return false;
 }
 
