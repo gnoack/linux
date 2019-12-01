@@ -28,10 +28,10 @@ extern struct pm_dentry_set *pm_dup_dentry_set(struct pm_dentry_set *set);
 /* Checks whether the dentry or any of its parent dentries are in the whitelist set. */
 extern bool pm_is_whitelisted(struct pm_dentry_set *whitelist, struct dentry *dentry);
 
-struct pm_task_ctx {
+struct pathmask_policy {
 	bool is_locked_down;
 	/* TODO(gnoack): Split into read and write whitelists. */
-	struct pm_dentry_set *ctx_paths;
+	struct pm_dentry_set *paths;
 };
 
 #endif /* __PM_TYPES_H */
