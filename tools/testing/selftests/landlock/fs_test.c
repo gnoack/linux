@@ -2237,6 +2237,86 @@ TEST_F_FORK(layout1, reparent_rename)
 	ASSERT_EQ(EXDEV, errno);
 }
 
+TEST_F_FORK(layout1, truncate)
+{
+	const struct rule rules[] = {
+		{
+			.path = file1_s1d1,
+			.access = LANDLOCK_ACCESS_FS_READ_FILE |
+				  LANDLOCK_ACCESS_FS_WRITE_FILE |
+				  LANDLOCK_ACCESS_FS_TRUNCATE,
+		},
+		{
+			.path = file2_s1d2,
+			.access = LANDLOCK_ACCESS_FS_READ_FILE |
+				  LANDLOCK_ACCESS_FS_WRITE_FILE,
+		},
+		{
+			.path = file1_s1d2,
+			.access = LANDLOCK_ACCESS_FS_TRUNCATE,
+		},
+		{
+			.path = dir_s2d3,
+			.access = LANDLOCK_ACCESS_FS_TRUNCATE,
+		},
+		// Implicitly: No access rights for file2_s1d1.
+		{},
+	};
+	const int ruleset_fd = create_ruleset(_metadata, ACCESS_ALL, rules);
+	int reg_fd;
+
+	ASSERT_LE(0, ruleset_fd);
+	enforce_ruleset(_metadata, ruleset_fd);
+	ASSERT_EQ(0, close(ruleset_fd));
+
+	/* Read, write and truncate permissions => truncate and ftruncate work. */
+	reg_fd = open(file1_s1d1, O_RDWR | O_CLOEXEC);
+	ASSERT_LE(0, reg_fd);
+	EXPECT_EQ(0, ftruncate(reg_fd, 10));
+	EXPECT_EQ(0, ftruncate64(reg_fd, 20));
+	ASSERT_EQ(0, close(reg_fd));
+
+	EXPECT_EQ(0, truncate(file1_s1d1, 10));
+	EXPECT_EQ(0, truncate64(file1_s1d1, 20));
+
+	/* Just read and write permissions => no truncate variant works. */
+	reg_fd = open(file2_s1d2, O_RDWR | O_CLOEXEC);
+	ASSERT_LE(0, reg_fd);
+	EXPECT_EQ(-1, ftruncate(reg_fd, 10));
+	EXPECT_EQ(EACCES, errno);
+	EXPECT_EQ(-1, ftruncate64(reg_fd, 20));
+	EXPECT_EQ(EACCES, errno);
+	ASSERT_EQ(0, close(reg_fd));
+
+	EXPECT_EQ(-1, truncate(file2_s1d2, 10));
+	EXPECT_EQ(EACCES, errno);
+	EXPECT_EQ(-1, truncate64(file2_s1d2, 20));
+	EXPECT_EQ(EACCES, errno);
+
+	/* Just truncate permissions => truncate(64) works, but can't open file. */
+	ASSERT_EQ(-1, open(file1_s1d2, O_RDWR | O_CLOEXEC));
+	ASSERT_EQ(EACCES, errno);
+
+	EXPECT_EQ(0, truncate(file1_s1d2, 10));
+	EXPECT_EQ(0, truncate64(file1_s1d2, 20));
+
+	/* Just truncate permission on directory => truncate(64) works, but can't open file. */
+	ASSERT_EQ(-1, open(file1_s2d3, O_RDWR | O_CLOEXEC));
+	ASSERT_EQ(EACCES, errno);
+
+	EXPECT_EQ(0, truncate(file1_s2d3, 10));
+	EXPECT_EQ(0, truncate64(file1_s2d3, 20));
+
+	/* No permissions => Neither truncate nor ftruncate work. */
+	ASSERT_EQ(-1, open(file2_s1d1, O_RDWR | O_CLOEXEC));
+	ASSERT_EQ(EACCES, errno);
+
+	EXPECT_EQ(-1, truncate(file2_s1d1, 10));
+	EXPECT_EQ(EACCES, errno);
+	EXPECT_EQ(-1, truncate64(file2_s1d1, 20));
+	EXPECT_EQ(EACCES, errno);
+}
+
 static void
 reparent_exdev_layers_enforce1(struct __test_metadata *const _metadata)
 {
