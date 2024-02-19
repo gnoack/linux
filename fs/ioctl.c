@@ -764,6 +764,38 @@ static int ioctl_fssetxattr(struct file *file, void __user *argp)
 }
 
 /*
+ * Safeguard to maintain a list of valid IOCTLs handled by do_vfs_ioctl()
+ * instead of def_blk_fops or def_chr_fops (see init_special_inode).
+ */
+__attribute_const__ bool vfs_masked_device_ioctl(const unsigned int cmd)
+{
+	switch (cmd) {
+	case FIOCLEX:
+	case FIONCLEX:
+	case FIONBIO:
+	case FIOASYNC:
+	case FIOQSIZE:
+	case FIFREEZE:
+	case FITHAW:
+	case FS_IOC_FIEMAP:
+	case FIGETBSZ:
+	case FICLONE:
+	case FICLONERANGE:
+	case FIDEDUPERANGE:
+	/* FIONREAD is forwarded to device implementations. */
+	case FS_IOC_GETFLAGS:
+	case FS_IOC_SETFLAGS:
+	case FS_IOC_FSGETXATTR:
+	case FS_IOC_FSSETXATTR:
+	/* file_ioctl()'s IOCTLs are forwarded to device implementations. */
+		return true;
+	default:
+		return false;
+	}
+}
+EXPORT_SYMBOL(vfs_masked_device_ioctl);
+
+/*
  * do_vfs_ioctl() is not for drivers and not intended to be EXPORT_SYMBOL()'d.
  * It's just a simple helper for sys_ioctl and compat_sys_ioctl.
  *
@@ -858,6 +890,8 @@ SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
 {
 	struct fd f = fdget(fd);
 	int error;
+	const struct inode *inode;
+	bool is_device;
 
 	if (!f.file)
 		return -EBADF;
@@ -866,9 +900,18 @@ SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
 	if (error)
 		goto out;
 
-	error = do_vfs_ioctl(f.file, fd, cmd, arg);
-	if (error == -ENOIOCTLCMD)
+	inode = file_inode(f.file);
+	is_device = S_ISBLK(inode->i_mode) || S_ISCHR(inode->i_mode);
+	if (is_device && !vfs_masked_device_ioctl(cmd)) {
 		error = vfs_ioctl(f.file, cmd, arg);
+		goto out;
+	}
+
+	error = do_vfs_ioctl(f.file, fd, cmd, arg);
+	if (error == -ENOIOCTLCMD) {
+		WARN_ON_ONCE(is_device);
+		error = vfs_ioctl(f.file, cmd, arg);
+	}
 
 out:
 	fdput(f);
@@ -911,11 +954,49 @@ long compat_ptr_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 }
 EXPORT_SYMBOL(compat_ptr_ioctl);
 
+static long ioctl_compat(struct file *filp, unsigned int cmd,
+			 compat_ulong_t arg)
+{
+	int error = -ENOTTY;
+
+	if (!filp->f_op->compat_ioctl)
+		goto out;
+
+	error = filp->f_op->compat_ioctl(filp, cmd, arg);
+	if (error == -ENOIOCTLCMD)
+		error = -ENOTTY;
+
+out:
+	return error;
+}
+
+__attribute_const__ bool vfs_masked_device_ioctl_compat(const unsigned int cmd)
+{
+	switch (cmd) {
+	case FICLONE:
+#if defined(CONFIG_X86_64)
+	case FS_IOC_RESVSP_32:
+	case FS_IOC_RESVSP64_32:
+	case FS_IOC_UNRESVSP_32:
+	case FS_IOC_UNRESVSP64_32:
+	case FS_IOC_ZERO_RANGE_32:
+#endif
+	case FS_IOC32_GETFLAGS:
+	case FS_IOC32_SETFLAGS:
+		return true;
+	default:
+		return vfs_masked_device_ioctl(cmd);
+	}
+}
+EXPORT_SYMBOL(vfs_masked_device_ioctl_compat);
+
 COMPAT_SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd,
 		       compat_ulong_t, arg)
 {
 	struct fd f = fdget(fd);
 	int error;
+	const struct inode *inode;
+	bool is_device;
 
 	if (!f.file)
 		return -EBADF;
@@ -923,6 +1004,13 @@ COMPAT_SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd,
 	error = security_file_ioctl_compat(f.file, cmd, arg);
 	if (error)
 		goto out;
+
+	inode = file_inode(f.file);
+	is_device = S_ISBLK(inode->i_mode) || S_ISCHR(inode->i_mode);
+	if (is_device && !vfs_masked_device_ioctl_compat(cmd)) {
+		error = ioctl_compat(f.file, cmd, arg);
+		goto out;
+	}
 
 	switch (cmd) {
 	/* FICLONE takes an int argument, so don't use compat_ptr() */
@@ -964,13 +1052,10 @@ COMPAT_SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd,
 	default:
 		error = do_vfs_ioctl(f.file, fd, cmd,
 				     (unsigned long)compat_ptr(arg));
-		if (error != -ENOIOCTLCMD)
-			break;
-
-		if (f.file->f_op->compat_ioctl)
-			error = f.file->f_op->compat_ioctl(f.file, cmd, arg);
-		if (error == -ENOIOCTLCMD)
-			error = -ENOTTY;
+		if (error == -ENOIOCTLCMD) {
+			WARN_ON_ONCE(is_device);
+			error = ioctl_compat(f.file, cmd, arg);
+		}
 		break;
 	}
 

@@ -1904,6 +1904,18 @@ extern long compat_ptr_ioctl(struct file *file, unsigned int cmd,
 #define compat_ptr_ioctl NULL
 #endif
 
+extern __attribute_const__ bool vfs_masked_device_ioctl(const unsigned int cmd);
+#ifdef CONFIG_COMPAT
+extern __attribute_const__ bool
+vfs_masked_device_ioctl_compat(const unsigned int cmd);
+#else /* CONFIG_COMPAT */
+static inline __attribute_const__ bool
+vfs_masked_device_ioctl_compat(const unsigned int cmd)
+{
+	return vfs_masked_device_ioctl(cmd);
+}
+#endif /* CONFIG_COMPAT */
+
 /*
  * VFS file helper functions.
  */
