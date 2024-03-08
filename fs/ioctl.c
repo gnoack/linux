@@ -43,10 +43,16 @@
  */
 long vfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	int error = -ENOTTY;
+	int error;
 
-	if (!filp->f_op->unlocked_ioctl)
+	error = security_file_vfs_ioctl(filp, cmd, arg);
+	if (error)
 		goto out;
+
+	if (!filp->f_op->unlocked_ioctl) {
+		error = -ENOTTY;
+		goto out;
+	}
 
 	error = filp->f_op->unlocked_ioctl(filp, cmd, arg);
 	if (error == -ENOIOCTLCMD)
@@ -965,6 +971,10 @@ COMPAT_SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd,
 		error = do_vfs_ioctl(f.file, fd, cmd,
 				     (unsigned long)compat_ptr(arg));
 		if (error != -ENOIOCTLCMD)
+			break;
+
+		error = security_file_vfs_ioctl(f.file, cmd, arg);
+		if (error != 0)
 			break;
 
 		if (f.file->f_op->compat_ioctl)
