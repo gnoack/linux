@@ -2745,6 +2745,28 @@ int security_file_ioctl_compat(struct file *file, unsigned int cmd,
 }
 EXPORT_SYMBOL_GPL(security_file_ioctl_compat);
 
+/**
+ * security_file_vfs_ioctl() - Check if a ioctl implemented by the file is allowed
+ * @file: associated file
+ * @cmd: ioctl cmd
+ * @arg: ioctl arguments
+ *
+ * Check permission for an ioctl operation on @file.  Note that @arg sometimes
+ * represents a user space pointer; in other cases, it may be a simple integer
+ * value.  When @arg represents a user space pointer, it should never be used
+ * by the security module.
+ *
+ * This hook is checked just before calling f_op->unlocked_ioctl() or
+ * f_op->compat_ioctl().
+ *
+ * Return: Returns 0 if permission is granted.
+ */
+int security_file_vfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	return call_int_hook(file_vfs_ioctl, 0, file, cmd, arg);
+}
+EXPORT_SYMBOL_GPL(security_file_vfs_ioctl);
+
 static inline unsigned long mmap_prot(struct file *file, unsigned long prot)
 {
 	/*
