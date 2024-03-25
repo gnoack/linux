@@ -828,7 +828,7 @@ static int do_vfs_ioctl(struct file *filp, unsigned int fd,
 
 	case FIONREAD:
 		if (!S_ISREG(inode->i_mode))
-			return vfs_ioctl(filp, cmd, arg);
+			return -ENOIOCTLCMD;
 
 		return put_user(i_size_read(inode) - filp->f_pos,
 				(int __user *)argp);
@@ -858,17 +858,24 @@ SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
 {
 	struct fd f = fdget(fd);
 	int error;
+	bool use_file_ops = true;
 
 	if (!f.file)
 		return -EBADF;
 
 	error = security_file_ioctl(f.file, cmd, arg);
-	if (error)
+	if (error == -ENOFILEOPS)
+		use_file_ops = false;
+	else if (error)
 		goto out;
 
 	error = do_vfs_ioctl(f.file, fd, cmd, arg);
-	if (error == -ENOIOCTLCMD)
-		error = vfs_ioctl(f.file, cmd, arg);
+	if (error == -ENOIOCTLCMD) {
+		if (use_file_ops)
+			error = vfs_ioctl(f.file, cmd, arg);
+		else
+			error = -EACCES;
+	}
 
 out:
 	fdput(f);
@@ -916,12 +923,15 @@ COMPAT_SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd,
 {
 	struct fd f = fdget(fd);
 	int error;
+	bool use_file_ops = true;
 
 	if (!f.file)
 		return -EBADF;
 
 	error = security_file_ioctl_compat(f.file, cmd, arg);
-	if (error)
+	if (error == -ENOFILEOPS)
+		use_file_ops = false;
+	else if (error)
 		goto out;
 
 	switch (cmd) {
@@ -966,6 +976,11 @@ COMPAT_SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd,
 				     (unsigned long)compat_ptr(arg));
 		if (error != -ENOIOCTLCMD)
 			break;
+
+		if (!use_file_ops) {
+			error = -EACCES;
+			break;
+		}
 
 		if (f.file->f_op->compat_ioctl)
 			error = f.file->f_op->compat_ioctl(f.file, cmd, arg);

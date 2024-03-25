@@ -2719,7 +2719,10 @@ void security_file_free(struct file *file)
  * value.  When @arg represents a user space pointer, it should never be used
  * by the security module.
  *
- * Return: Returns 0 if permission is granted.
+ * Return: Returns 0 if permission is granted.  Returns -ENOFILEOPS if
+ *         permission is granted for IOCTL commands that do not get handled by
+ *         f_ops->unlocked_ioctl().  Returns another negative error code is
+ *         permission is denied.
  */
 int security_file_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -2736,7 +2739,10 @@ EXPORT_SYMBOL_GPL(security_file_ioctl);
  * Compat version of security_file_ioctl() that correctly handles 32-bit
  * processes running on 64-bit kernels.
  *
- * Return: Returns 0 if permission is granted.
+ * Return: Returns 0 if permission is granted. Returns -ENOFILEOPS if permission
+ *         is granted for IOCTL commands that do not get handled by
+ *         f_ops->compat_ioctl().  Returns another negative error code is
+ *         permission is denied.
  */
 int security_file_ioctl_compat(struct file *file, unsigned int cmd,
 			       unsigned long arg)

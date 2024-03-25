@@ -248,6 +248,12 @@ static const char * const kernel_load_data_str[] = {
 	__kernel_read_file_id(__data_id_stringify)
 };
 
+/*
+ * Returned by security_file_ioctl and security_file_ioctl_compat to indicate
+ * that the IOCTL request may not be dispatched to the file's f_ops IOCTL impl.
+ */
+#define ENOFILEOPS 532
+
 static inline const char *kernel_load_data_id_str(enum kernel_load_data_id id)
 {
 	if ((unsigned)id >= LOADING_MAX_ID)
