@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/net.h>
 #include <linux/landlock.h>
 #include <sched.h>
@@ -576,6 +577,31 @@ TEST_F(mini, socket_invalid_type)
 	EXPECT_EQ(0, close(ruleset_fd));
 
 	EXPECT_EQ(ESOCKTNOSUPPORT, test_socket(&srv_unix_invalid));
+}
+
+TEST_F(mini, socket_and_use_regular_file)
+{
+	const struct landlock_ruleset_attr ruleset_attr = {
+		.handled_access_socket = LANDLOCK_ACCESS_SOCKET_CREATE,
+	};
+	int ruleset_fd, fd;
+
+	/* Allowed created */
+	ruleset_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
+	ASSERT_LE(0, ruleset_fd);
+
+	enforce_ruleset(_metadata, ruleset_fd);
+	ASSERT_EQ(0, close(ruleset_fd));
+
+	/*
+	 * Accessing /dev/null for writing should be permitted,
+	 * because we did not add any file system restrictions.
+	 */
+	fd = open("/dev/null", O_WRONLY);
+	EXPECT_LE(0, fd);
+
+	ASSERT_EQ(0, close(fd));
 }
 
 TEST_HARNESS_MAIN
