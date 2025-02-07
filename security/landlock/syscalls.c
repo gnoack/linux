@@ -23,6 +23,7 @@
 #include <linux/security.h>
 #include <linux/stddef.h>
 #include <linux/syscalls.h>
+#include <linux/task_work.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <uapi/linux/landlock.h>
@@ -425,16 +426,232 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 
 /* Enforcement */
 
+/*
+ * Shared state between multiple threads which are enforcing Landlock rulesets
+ * in lockstep with each other.
+ */
+struct landlock_tsync_shared_context {
+	/* Expected existing Landlock domain on every thread. */
+	struct landlock_ruleset *old_dom;
+
+	/* Replacement Landlock domain to be applied if prerequisites are met */
+	struct landlock_ruleset *new_dom;
+
+	/* Barrier after preparation step. */
+	atomic_t num_preparing;
+	struct completion all_prepared;
+
+	/* An error encountered in preparation step, or 0. */
+	atomic_t preparation_error;
+
+	/*
+	 * Barrier after commit step (used by syscall impl to wait for
+	 * completion).
+	 */
+	atomic_t num_unfinished;
+	struct completion all_finished;
+};
+
+struct landlock_tsync_context {
+	struct callback_head work;
+	struct landlock_tsync_shared_context *ctx;
+};
+
+static struct cred *
+landlock_prepare_creds(const struct landlock_ruleset *old_dom,
+		       struct landlock_ruleset *new_dom)
+{
+	struct cred *new_cred;
+	struct landlock_cred_security *new_llcred;
+
+	/*
+	 * Similar checks as for seccomp(2), except that an -EPERM may be
+	 * returned.
+	 */
+	if (!task_no_new_privs(current) &&
+	    !ns_capable_noaudit(current_user_ns(), CAP_SYS_ADMIN))
+		return ERR_PTR(-EPERM);
+
+	/* Prepares new credentials. */
+	new_cred = prepare_creds();
+	if (!new_cred)
+		return ERR_PTR(-ENOMEM);
+
+	new_llcred = landlock_cred(new_cred);
+	if (new_llcred->domain != old_dom) {
+		abort_creds(new_cred);
+		return ERR_PTR(-ESRCH);
+	}
+
+	/* Replaces the old (prepared) domain. */
+	landlock_put_ruleset(new_llcred->domain);
+	landlock_get_ruleset(new_dom);
+	new_llcred->domain = new_dom;
+
+	return new_cred;
+}
+
+/*
+ * restrict_one_thread - update a thread's Landlock domain in lockstep with the
+ * other threads in the same process.
+ *
+ * When this is run, the same function gets run in all other threads in the same
+ * process.  The concurrently running function invocations coordinate to wait
+ * until they are all done with the preparation step and have reported back
+ * errors from the preparation step, if necessary.
+ *
+ * Afterwards, depending on the presence of an error, all threads either commit
+ * or abort the prepared credentials.  The commit operation can not fail any more.
+ */
+static void restrict_one_thread(struct landlock_tsync_shared_context *ctx)
+{
+	int res;
+	struct cred *cred = landlock_prepare_creds(ctx->old_dom, ctx->new_dom);
+
+	/* On error, set the error and continue. (Do not return early.) */
+	if (IS_ERR(cred))
+		atomic_set(&ctx->preparation_error, PTR_ERR(cred));
+
+	/*
+	 * Barrier: Wait until all threads are done preparing.
+	 * After this point, we can have no more failures.
+	 */
+	if (atomic_dec_return(&ctx->num_preparing) == 0)
+		complete_all(&ctx->all_prepared);
+	wait_for_completion(&ctx->all_prepared);
+
+	/*
+	 * Abort the commit if any of the threads had an error.
+	 * (It might also be this thread.)  Otherwise, commit.
+	 */
+	res = atomic_read(&ctx->preparation_error);
+	if (res) {
+		if (!IS_ERR(cred))
+			abort_creds(cred);
+	} else {
+		commit_creds(cred);
+	}
+
+	/* Notify the calling thread once all threads are done */
+	if (atomic_dec_return(&ctx->num_unfinished) == 0)
+		complete_all(&ctx->all_finished);
+}
+
+/*
+ * restrict_one_thread_callback - task_work callback for restricting a thread
+ *
+ * Calls restrict_one_thread with the struct landlock_shared_tsync_context
+ * and frees up the per-work_task landlock_tsync_context afterwards.
+ */
+static void restrict_one_thread_callback(struct callback_head *work)
+{
+	struct landlock_tsync_context *ctx =
+		container_of(work, struct landlock_tsync_context, work);
+	struct landlock_tsync_shared_context *sctx = ctx->ctx;
+
+	restrict_one_thread(sctx);
+	kfree(ctx);
+}
+
+/*
+ * restrict_all_threads - enables a Landlock policy for all threads
+ */
+static int restrict_all_threads(const int ruleset_fd)
+{
+	int res;
+	struct task_struct *thread, *caller;
+	struct landlock_tsync_shared_context sctx;
+	struct landlock_ruleset *ruleset;
+
+	/*
+	 * XXX: Need to double check race conditions and deadlocks before
+	 * merging this upstream. We probably need additional locking.
+	 */
+
+	/* Starting with 1, as we're already counting current. */
+	atomic_set(&sctx.num_preparing, 1);
+	atomic_set(&sctx.num_unfinished, 1);
+	init_completion(&sctx.all_prepared);
+	init_completion(&sctx.all_finished);
+	atomic_set(&sctx.preparation_error, 0);
+	sctx.old_dom = landlock_get_current_domain();
+
+	/* Gets and checks the ruleset. */
+	ruleset = get_ruleset_from_fd(ruleset_fd, FMODE_CAN_READ);
+	if (IS_ERR(ruleset))
+		return PTR_ERR(ruleset);
+
+	/*
+	 * We pre-merge the domain for all threads,
+	 * so that all threads end up with exactly the same domain.
+	 */
+	sctx.new_dom = landlock_merge_ruleset(sctx.old_dom, ruleset);
+	landlock_put_ruleset(ruleset);
+	if (IS_ERR(sctx.new_dom))
+		return PTR_ERR(sctx.new_dom);
+
+	landlock_get_ruleset(sctx.old_dom);
+
+	caller = current;
+	for_each_thread(caller, thread) {
+		/* Skip current, since it is initiating the sync. */
+		if (thread == caller)
+			continue;
+
+		/* Skip exited threads. */
+		if (thread->flags & PF_EXITING)
+			continue;
+
+		/* Deallocation is done by the task_work itself. */
+		struct landlock_tsync_context *ctx =
+			kzalloc(sizeof(*ctx), GFP_KERNEL_ACCOUNT);
+		if (!ctx) {
+			/*
+			 * On error, keep already started threads from
+			 * accidentally committing.  Do not start additional
+			 * threads.
+			 */
+			atomic_set(&sctx.preparation_error, -ENOMEM);
+			break;
+		}
+
+		ctx->ctx = &sctx;
+		atomic_inc(&sctx.num_preparing);
+		atomic_inc(&sctx.num_unfinished);
+		init_task_work(&ctx->work, restrict_one_thread_callback);
+		res = task_work_add(thread, &ctx->work, TWA_SIGNAL);
+		if (res) {
+			atomic_set(&sctx.preparation_error, res);
+			atomic_dec(&sctx.num_preparing);
+			atomic_dec(&sctx.num_unfinished);
+		}
+	}
+
+	/* and do the same on the current thread */
+	restrict_one_thread(&sctx);
+
+	res = atomic_read(&sctx.preparation_error);
+	wait_for_completion(&sctx.all_finished);
+	landlock_put_ruleset(sctx.new_dom);
+	landlock_put_ruleset(sctx.old_dom);
+	return res;
+}
+
 /**
  * sys_landlock_restrict_self - Enforce a ruleset on the calling thread
  *
  * @ruleset_fd: File descriptor tied to the ruleset to merge with the target.
- * @flags: Must be 0.
+ * @flags: Flags to modify the behavior.
  *
- * This system call enables to enforce a Landlock ruleset on the current
- * thread.  Enforcing a ruleset requires that the task has %CAP_SYS_ADMIN in its
+ * This system call enforces a Landlock ruleset on the current thread.
+ * Enforcing a ruleset requires that the task has %CAP_SYS_ADMIN in its
  * namespace or is running with no_new_privs.  This avoids scenarios where
  * unprivileged tasks can affect the behavior of privileged children.
+ *
+ * If %LANDLOCK_RESTRICT_SELF_TSYNC is specified in @flags, the ruleset will be
+ * applied to all threads of the current process.  For this, all threads must be
+ * in the same Landlock domain and fulfill the normal requirements for enforcing
+ * a Landlock ruleset.
  *
  * Possible returned errors are:
  *
@@ -447,6 +664,8 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
  *   %CAP_SYS_ADMIN in its namespace.
  * - %E2BIG: The maximum number of stacked rulesets is reached for the current
  *   thread.
+ * - %ESRCH: When called with %LANDLOCK_RESTRICT_SELF_TSYNC, the processes'
+ *   threads were in different Landlock domains.
  */
 SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		flags)
@@ -467,9 +686,12 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 	    !ns_capable_noaudit(current_user_ns(), CAP_SYS_ADMIN))
 		return -EPERM;
 
-	/* No flag for now. */
-	if (flags)
+	/* TSYNC is the only supported flag. */
+	if (flags & ~LANDLOCK_RESTRICT_SELF_TSYNC)
 		return -EINVAL;
+
+	if (flags & LANDLOCK_RESTRICT_SELF_TSYNC)
+		return restrict_all_threads(ruleset_fd);
 
 	/* Gets and checks the ruleset. */
 	ruleset = get_ruleset_from_fd(ruleset_fd, FMODE_CAN_READ);

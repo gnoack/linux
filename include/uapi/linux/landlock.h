@@ -62,6 +62,16 @@ struct landlock_ruleset_attr {
 #define LANDLOCK_CREATE_RULESET_VERSION			(1U << 0)
 /* clang-format on */
 
+/*
+ * sys_landlock_restrict_self() flags:
+ *
+ * - %LANDLOCK_RESTRICT_SELF_TSYNC: Apply the given ruleset to all threads of
+ *    the current process.
+ */
+/* clang-format off */
+#define LANDLOCK_RESTRICT_SELF_TSYNC			(1U << 0)
+/* clang-format on */
+
 /**
  * enum landlock_rule_type - Landlock rule type
  *
