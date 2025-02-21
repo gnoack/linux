@@ -117,11 +117,15 @@ struct landlock_ruleset_attr {
  *     future nested domains, not the one being created. It can also be used
  *     with a @ruleset_fd value of -1 to mute subdomain logs without creating a
  *     domain.
+ *
+ * %LANDLOCK_RESTRICT_SELF_TSYNC
+ *    Apply the given ruleset atomically to all threads of the current process.
  */
 /* clang-format off */
 #define LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF		(1U << 0)
 #define LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON			(1U << 1)
 #define LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF		(1U << 2)
+#define LANDLOCK_RESTRICT_SELF_TSYNC				(1U << 3)
 /* clang-format on */
 
 /**
