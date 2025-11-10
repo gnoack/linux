@@ -502,9 +502,8 @@ static void restrict_one_thread(struct tsync_shared_context *ctx)
 {
 	int err;
 	struct cred *cred = NULL;
-	const struct cred *current_cred = current_cred();
 
-	if (current_cred == ctx->old_cred) {
+	if (current_cred() == ctx->old_cred) {
 		/*
 		 * As a shortcut, switch out old_cred with new_cred, if
 		 * possible.
