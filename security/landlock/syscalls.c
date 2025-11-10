@@ -500,7 +500,7 @@ struct tsync_work {
  */
 static void restrict_one_thread(struct tsync_shared_context *ctx)
 {
-	int res;
+	int err;
 	struct cred *cred = NULL;
 	const struct cred *current_cred = current_cred();
 
@@ -548,8 +548,8 @@ static void restrict_one_thread(struct tsync_shared_context *ctx)
 	wait_for_completion(&ctx->ready_to_commit);
 
 	/* Abort the commit if any of the other threads had an error. */
-	res = atomic_read(&ctx->preparation_error);
-	if (res) {
+	err = atomic_read(&ctx->preparation_error);
+	if (err) {
 		abort_creds(cred);
 		goto out;
 	}
