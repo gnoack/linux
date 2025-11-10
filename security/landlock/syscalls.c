@@ -505,8 +505,12 @@ static void restrict_one_thread(struct tsync_shared_context *ctx)
 
 	if (current_cred() == ctx->old_cred) {
 		/*
-		 * As a shortcut, switch out old_cred with new_cred, if
-		 * possible.
+		 * Switch out old_cred with new_cred, if possible.
+		 *
+		 * In the common case, where all threads initially point to the
+		 * same struct cred, this optimization avoids creating separate
+		 * redundant credentials objects for each, which would all have
+		 * the same contents.
 		 *
 		 * Note: We are intentionally dropping the const qualifier here,
 		 * because it is required by commit_creds() and abort_creds().
