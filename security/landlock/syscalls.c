@@ -627,7 +627,7 @@ static struct tsync_work *tsync_works_provide(struct tsync_works *s,
  */
 static int tsync_works_grow_by(struct tsync_works *s, size_t n, gfp_t flags)
 {
-	int i;
+	sizt_t i;
 	size_t new_capacity = s->capacity + n;
 	struct tsync_work **works;
 
@@ -675,7 +675,7 @@ static bool tsync_works_contains_task(struct tsync_works *s,
  */
 static void tsync_works_free(struct tsync_works *s)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < s->size; i++)
 		put_task_struct(s->works[i]->task);
