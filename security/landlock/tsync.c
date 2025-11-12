@@ -201,20 +201,20 @@ static int tsync_works_grow_by(struct tsync_works *s, size_t n, gfp_t flags)
 
 	works = krealloc_array(s->works, new_capacity, sizeof(s->works[0]),
 			       flags);
-	if (IS_ERR(works))
-		return PTR_ERR(works);
+	if (!works)
+		return -ENOMEM;
 
 	s->works = works;
 
 	for (i = s->capacity; i < new_capacity; i++) {
 		s->works[i] = kzalloc(sizeof(*s->works[i]), flags);
-		if (IS_ERR(s->works[i])) {
+		if (!s->works[i]) {
 			/*
 			 * Leave the object in a consistent state,
 			 * but return an error.
 			 */
 			s->capacity = i;
-			return PTR_ERR(s->works[i]);
+			return -ENOMEM;
 		}
 	}
 	s->capacity = new_capacity;
