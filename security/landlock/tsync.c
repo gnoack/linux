@@ -243,9 +243,9 @@ static bool tsync_works_contains_task(struct tsync_works *s,
 }
 
 /*
- * tsync_works_free - free memory held by s and drop all task references
+ * tsync_works_release - free memory held by s and drop all task references
  */
-static void tsync_works_free(struct tsync_works *s)
+static void tsync_works_release(struct tsync_works *s)
 {
 	size_t i;
 
@@ -427,7 +427,7 @@ int landlock_restrict_sibling_threads(const struct cred *old_cred,
 	if (works.size)
 		wait_for_completion(&shared_ctx.all_finished);
 
-	tsync_works_free(&works);
+	tsync_works_release(&works);
 
 	return atomic_read(&shared_ctx.preparation_error);
 }
