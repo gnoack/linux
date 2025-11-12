@@ -493,7 +493,7 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 	struct landlock_cred_security *new_llcred;
 	bool __maybe_unused log_same_exec, log_new_exec, log_subdomains,
 		prev_log_subdomains;
-	int res;
+	int err;
 
 	if (!is_initialized())
 		return -EOPNOTSUPP;
@@ -577,11 +577,11 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 #endif /* CONFIG_AUDIT */
 
 	if (flags & LANDLOCK_RESTRICT_SELF_TSYNC) {
-		res = landlock_restrict_sibling_threads(current_cred(),
+		err = landlock_restrict_sibling_threads(current_cred(),
 							new_cred);
-		if (res != 0) {
+		if (err != 0) {
 			abort_creds(new_cred);
-			return res;
+			return err;
 		}
 	}
 
