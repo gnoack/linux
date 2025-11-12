@@ -163,6 +163,10 @@ struct tsync_works {
  * This also stores a task pointer in the context and increments the reference
  * count of the task.
  *
+ * This function may fail in the case where we did not preallocate sufficient
+ * capacity.  This can legitimately happen if new threads get started after we
+ * grew the capacity.
+ *
  * Returns:
  *   A pointer to the preallocated context struct, with task filled in.
  *
@@ -244,6 +248,8 @@ static bool tsync_works_contains_task(struct tsync_works *s,
 
 /*
  * tsync_works_release - free memory held by s and drop all task references
+ *
+ * This does not free s itself, only the data structures held by it.
  */
 static void tsync_works_release(struct tsync_works *s)
 {
