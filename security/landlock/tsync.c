@@ -202,6 +202,7 @@ static int tsync_works_grow_by(struct tsync_works *s, size_t n, gfp_t flags)
 	size_t i;
 	size_t new_capacity;
 	struct tsync_work **works;
+	struct tsync_work *work;
 
 	if (check_add_overflow(s->size, n, &new_capacity))
 		return -EOVERFLOW;
@@ -218,8 +219,8 @@ static int tsync_works_grow_by(struct tsync_works *s, size_t n, gfp_t flags)
 	s->works = works;
 
 	for (i = s->capacity; i < new_capacity; i++) {
-		s->works[i] = kzalloc(sizeof(*s->works[i]), flags);
-		if (!s->works[i]) {
+		work = kzalloc(sizeof(*work), flags);
+		if (!work) {
 			/*
 			 * Leave the object in a consistent state,
 			 * but return an error.
@@ -227,6 +228,7 @@ static int tsync_works_grow_by(struct tsync_works *s, size_t n, gfp_t flags)
 			s->capacity = i;
 			return -ENOMEM;
 		}
+		s->works[i] = work;
 	}
 	s->capacity = new_capacity;
 	return 0;
