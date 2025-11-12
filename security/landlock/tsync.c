@@ -186,6 +186,9 @@ static struct tsync_work *tsync_works_provide(struct tsync_works *s,
 /*
  * tsync_works_grow_by - preallocates space for n more contexts in s
  *
+ * On a successful return, the subsequent n calls to tsync_works_provide() are
+ * guaranteed to succeed.  (size + n <= capacity)
+ *
  * Returns:
  *   -ENOMEM if the (re)allocation fails
  *   0       if the allocation succeeds, partially succeeds, or no reallocation was needed
@@ -193,9 +196,10 @@ static struct tsync_work *tsync_works_provide(struct tsync_works *s,
 static int tsync_works_grow_by(struct tsync_works *s, size_t n, gfp_t flags)
 {
 	size_t i;
-	size_t new_capacity = s->capacity + n;
+	size_t new_capacity = s->size + n;
 	struct tsync_work **works;
 
+	/* No need to reallocate if s already has sufficient capacity. */
 	if (new_capacity <= s->capacity)
 		return 0;
 
