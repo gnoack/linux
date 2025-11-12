@@ -196,8 +196,11 @@ static struct tsync_work *tsync_works_provide(struct tsync_works *s,
 static int tsync_works_grow_by(struct tsync_works *s, size_t n, gfp_t flags)
 {
 	size_t i;
-	size_t new_capacity = s->size + n;
+	size_t new_capacity;
 	struct tsync_work **works;
+
+	if (check_add_overflow(s->size, n, &new_capacity))
+		return -EOVERFLOW;
 
 	/* No need to reallocate if s already has sufficient capacity. */
 	if (new_capacity <= s->capacity)
