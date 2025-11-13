@@ -249,7 +249,7 @@ static bool tsync_works_contains_task(const struct tsync_works *s,
 }
 
 /*
- * tsync_works_release - free memory held by s and drop all task references
+ * tsync_works_release - frees memory held by s and drops all task references
  *
  * This does not free s itself, only the data structures held by it.
  */
