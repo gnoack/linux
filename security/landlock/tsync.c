@@ -237,7 +237,7 @@ static int tsync_works_grow_by(struct tsync_works *s, size_t n, gfp_t flags)
 /*
  * tsync_works_contains - checks for presence of task in s
  */
-static bool tsync_works_contains_task(struct tsync_works *s,
+static bool tsync_works_contains_task(const struct tsync_works *s,
 				      struct task_struct *task)
 {
 	size_t i;
