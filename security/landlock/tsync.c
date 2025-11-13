@@ -25,7 +25,7 @@ struct tsync_shared_context {
 	atomic_t preparation_error;
 
 	/*
-	 * Barrier after preparation step in the inner loop.
+	 * Barrier after preparation step in restrict_one_thread.
 	 * The calling thread waits for completion.
 	 *
 	 * Re-initialized on every round of looking for newly spawned threads.
@@ -303,18 +303,93 @@ static size_t count_additional_threads(const struct tsync_works *works)
 }
 
 /*
+ * schedule_task_work - adds task_work for all eligible sibling threads
+ *                      which have not been scheduled yet
+ *
+ * For each added task_work, atomically increments shared_ctx->num_preparing and
+ * shared_ctx->num_unfinished.
+ *
+ * Returns:
+ *     true, if at least one eligible sibling thread was found
+ */
+static bool schedule_task_work(struct tsync_works *works,
+			       struct tsync_shared_context *shared_ctx)
+{
+	int err;
+	struct task_struct *thread, *caller;
+	struct tsync_work *ctx;
+	bool found_more_threads = false;
+
+	caller = current;
+
+	guard(rcu)();
+
+	for_each_thread(caller, thread) {
+		/* Skip current, since it is initiating the sync. */
+		if (thread == caller)
+			continue;
+
+		/* Skip exited threads. */
+		if (thread->flags & PF_EXITING)
+			continue;
+
+		/* Skip threads that we already looked at. */
+		if (tsync_works_contains_task(works, thread))
+			continue;
+
+		/*
+		 * We found a sibling thread that is not doing its task_work
+		 * yet, and which might spawn new threads before our task work
+		 * runs, so we need at least one more round in the outer loop.
+		 */
+		found_more_threads = true;
+
+		ctx = tsync_works_provide(works, thread);
+		if (!ctx) {
+			/*
+			 * We ran out of preallocated contexts -- we need to try
+			 * again with this thread at a later time!
+			 * found_more_threads is already true at this point.
+			 */
+			break;
+		}
+
+		ctx->shared_ctx = shared_ctx;
+
+		atomic_inc(&shared_ctx->num_preparing);
+		atomic_inc(&shared_ctx->num_unfinished);
+
+		init_task_work(&ctx->work, restrict_one_thread_callback);
+		err = task_work_add(thread, &ctx->work, TWA_SIGNAL);
+		if (err) {
+			/*
+			 * Remove the task from ctx so that we will revisit the
+			 * task at a later stage, if it still exists.
+			 */
+			put_task_struct_rcu_user(ctx->task);
+			ctx->task = NULL;
+
+			atomic_set(&shared_ctx->preparation_error, err);
+			atomic_dec(&shared_ctx->num_preparing);
+			atomic_dec(&shared_ctx->num_unfinished);
+		}
+	}
+
+	return found_more_threads;
+}
+
+/*
  * restrict_sibling_threads - enables a Landlock policy for all sibling threads
  */
 int landlock_restrict_sibling_threads(const struct cred *old_cred,
 				      const struct cred *new_cred)
 {
-	int res;
-	struct task_struct *thread, *caller;
+	int err;
+	struct task_struct *caller;
 	struct tsync_shared_context shared_ctx;
 	struct tsync_works works = {};
 	size_t newly_discovered_threads;
 	bool found_more_threads;
-	struct tsync_work *ctx;
 
 	atomic_set(&shared_ctx.preparation_error, 0);
 	init_completion(&shared_ctx.all_prepared);
@@ -350,94 +425,38 @@ int landlock_restrict_sibling_threads(const struct cred *old_cred,
 	 *    "all_finished")
 	 */
 	do {
-		found_more_threads = false;
-
-		/*
-		 * The "all_prepared" barrier is used locally to the inner loop,
-		 * this use of for_each_thread().  We can reset it on each loop
-		 * iteration because all previous loop iterations are done with
-		 * it already.
-		 *
-		 * num_preparing is initialized to 1 so that the counter can not
-		 * go to 0 and mark the completion as done before all task works
-		 * are registered.  (We decrement it at the end of this loop.)
-		 */
-		atomic_set(&shared_ctx.num_preparing, 1);
-		reinit_completion(&shared_ctx.all_prepared);
-
 		/* In RCU read-lock, count the threads we need. */
 		newly_discovered_threads = count_additional_threads(&works);
 
 		if (newly_discovered_threads == 0)
 			break; /* done */
 
-		res = tsync_works_grow_by(&works, newly_discovered_threads,
+		err = tsync_works_grow_by(&works, newly_discovered_threads,
 					  GFP_KERNEL_ACCOUNT);
-		if (res) {
-			atomic_set(&shared_ctx.preparation_error, res);
+		if (err) {
+			atomic_set(&shared_ctx.preparation_error, err);
 			break;
 		}
 
-		rcu_read_lock();
-		for_each_thread(caller, thread) {
-			/* Skip current, since it is initiating the sync. */
-			if (thread == caller)
-				continue;
+		/*
+		 * The "all_prepared" barrier is used locally to the loop body,
+		 * this use of for_each_thread().  We can reset it on each loop
+		 * iteration because all previous loop iterations are done with
+		 * it already.
+		 *
+		 * num_preparing is initialized to 1 so that the counter can not
+		 * go to 0 and mark the completion as done before all task works
+		 * are registered.  We decrement it at the end of the loop body.
+		 */
+		atomic_set(&shared_ctx.num_preparing, 1);
+		reinit_completion(&shared_ctx.all_prepared);
 
-			/* Skip exited threads. */
-			if (thread->flags & PF_EXITING)
-				continue;
-
-			/* Skip threads that we already looked at. */
-			if (tsync_works_contains_task(&works, thread))
-				continue;
-
-			/*
-			 * We found a sibling thread that is not doing its
-			 * task_work yet, and which might spawn new threads
-			 * before our task work runs, so we need at least one
-			 * more round in the outer loop.
-			 */
-			found_more_threads = true;
-
-			ctx = tsync_works_provide(&works, thread);
-			if (!ctx) {
-				/*
-				 * We ran out of preallocated contexts -- we
-				 * need to try again with this thread at a later
-				 * time!  found_more_threads is already true
-				 * at this point.
-				 */
-				break;
-			}
-
-			ctx->shared_ctx = &shared_ctx;
-
-			atomic_inc(&shared_ctx.num_preparing);
-			atomic_inc(&shared_ctx.num_unfinished);
-
-			init_task_work(&ctx->work,
-				       restrict_one_thread_callback);
-			res = task_work_add(thread, &ctx->work, TWA_SIGNAL);
-			if (res) {
-				/*
-				 * Remove the task from ctx so that we will
-				 * revisit the task at a later stage, if it
-				 * still exists.
-				 */
-				put_task_struct_rcu_user(ctx->task);
-				ctx->task = NULL;
-
-				atomic_set(&shared_ctx.preparation_error, res);
-				atomic_dec(&shared_ctx.num_preparing);
-				atomic_dec(&shared_ctx.num_unfinished);
-			}
-		}
-		rcu_read_unlock();
+		/* In RCU read-lock, schedule task work on newly discovered sibling tasks. */
+		found_more_threads = schedule_task_work(&works, &shared_ctx);
 
 		/*
 		 * Decrement num_preparing for current, to undo that we
-		 * initialized it to 1 at the beginning of the inner loop.
+		 * initialized it to 1 a few lines above.
 		 */
 		if (atomic_dec_return(&shared_ctx.num_preparing) > 0)
 			wait_for_completion(&shared_ctx.all_prepared);
