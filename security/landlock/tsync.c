@@ -268,6 +268,37 @@ static void tsync_works_release(struct tsync_works *s)
 }
 
 /*
+ * count_additional_threads - counts the sibling threads that are not in works
+ */
+static size_t count_additional_threads(const struct tsync_works *works)
+{
+	/* In RCU read-lock, count the threads we need. */
+	struct task_struct *thread, *caller;
+	size_t n = 0;
+
+	caller = current;
+
+	guard(rcu)();
+
+	for_each_thread(caller, thread) {
+		/* Skip current, since it is initiating the sync. */
+		if (thread == caller)
+			continue;
+
+		/* Skip exited threads. */
+		if (thread->flags & PF_EXITING)
+			continue;
+
+		/* Skip threads that we have already seen. */
+		if (tsync_works_contains_task(works, thread))
+			continue;
+
+		n++;
+	}
+	return n;
+}
+
+/*
  * restrict_sibling_threads - enables a Landlock policy for all sibling threads
  */
 int landlock_restrict_sibling_threads(const struct cred *old_cred,
@@ -331,24 +362,7 @@ int landlock_restrict_sibling_threads(const struct cred *old_cred,
 		reinit_completion(&shared_ctx.all_prepared);
 
 		/* In RCU read-lock, count the threads we need. */
-		newly_discovered_threads = 0;
-		rcu_read_lock();
-		for_each_thread(caller, thread) {
-			/* Skip current, since it is initiating the sync. */
-			if (thread == caller)
-				continue;
-
-			/* Skip exited threads. */
-			if (thread->flags & PF_EXITING)
-				continue;
-
-			/* Skip threads that we have already seen. */
-			if (tsync_works_contains_task(&works, thread))
-				continue;
-
-			newly_discovered_threads++;
-		}
-		rcu_read_unlock();
+		newly_discovered_threads = count_additional_threads(&works);
 
 		if (newly_discovered_threads == 0)
 			break; /* done */
