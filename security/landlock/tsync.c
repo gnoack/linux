@@ -277,7 +277,6 @@ static void tsync_works_release(struct tsync_works *s)
  */
 static size_t count_additional_threads(const struct tsync_works *works)
 {
-	/* In RCU read-lock, count the threads we need. */
 	struct task_struct *thread, *caller;
 	size_t n = 0;
 
