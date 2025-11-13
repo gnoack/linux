@@ -257,8 +257,13 @@ static void tsync_works_release(struct tsync_works *s)
 {
 	size_t i;
 
-	for (i = 0; i < s->size; i++)
+	for (i = 0; i < s->size; i++) {
+		if (!s->works[i]->task)
+			continue;
+
 		put_task_struct(s->works[i]->task);
+	}
+
 	for (i = 0; i < s->capacity; i++)
 		kfree(s->works[i]);
 	kfree(s->works);
