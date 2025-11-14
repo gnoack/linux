@@ -366,7 +366,7 @@ static bool schedule_task_work(struct tsync_works *works,
 			 * Remove the task from ctx so that we will revisit the
 			 * task at a later stage, if it still exists.
 			 */
-			put_task_struct_rcu_user(ctx->task);
+			put_task_struct(ctx->task);
 			ctx->task = NULL;
 
 			atomic_set(&shared_ctx->preparation_error, err);
