@@ -394,7 +394,7 @@ int landlock_restrict_sibling_threads(const struct cred *old_cred,
 	atomic_set(&shared_ctx.preparation_error, 0);
 	init_completion(&shared_ctx.all_prepared);
 	init_completion(&shared_ctx.ready_to_commit);
-	atomic_set(&shared_ctx.num_unfinished, 0);
+	atomic_set(&shared_ctx.num_unfinished, 1);
 	init_completion(&shared_ctx.all_finished);
 	shared_ctx.old_cred = old_cred;
 	shared_ctx.new_cred = new_cred;
@@ -469,7 +469,11 @@ int landlock_restrict_sibling_threads(const struct cred *old_cred,
 	 */
 	complete_all(&shared_ctx.ready_to_commit);
 
-	if (works.size)
+	/*
+	 * Decrement num_unfinished for current, to undo that we initialized it
+	 * to 1 at the beginning.
+	 */
+	if (atomic_dec_return(&shared_ctx.num_unfinished) > 0)
 		wait_for_completion(&shared_ctx.all_finished);
 
 	tsync_works_release(&works);
