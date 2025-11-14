@@ -363,13 +363,16 @@ static bool schedule_task_work(struct tsync_works *works,
 		err = task_work_add(thread, &ctx->work, TWA_SIGNAL);
 		if (err) {
 			/*
-			 * Remove the task from ctx so that we will revisit the
-			 * task at a later stage, if it still exists.
+			 * task_work_add() only fails if the task is about to
+			 * exit.  We checked that earlier, but it can happen as
+			 * a race.  Resume without setting an error, as the task
+			 * is probably gone in the next loop iteration.  For
+			 * consistency, remove the task from ctx so that it does
+			 * not look like we handed it a task_work.
 			 */
 			put_task_struct(ctx->task);
 			ctx->task = NULL;
 
-			atomic_set(&shared_ctx->preparation_error, err);
 			atomic_dec(&shared_ctx->num_preparing);
 			atomic_dec(&shared_ctx->num_unfinished);
 		}
