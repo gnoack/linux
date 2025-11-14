@@ -22,7 +22,10 @@ static int create_ruleset(struct __test_metadata *const _metadata)
 	const int ruleset_fd =
 		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
 
-	ASSERT_LE(0, ruleset_fd);
+	ASSERT_LE(0, ruleset_fd)
+	{
+		TH_LOG("landlock_create_ruleset: %s", strerror(errno));
+	}
 	return ruleset_fd;
 }
 
