@@ -548,33 +548,33 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 	 * We could optimize this case by not calling commit_creds() if this flag
 	 * was already set, but it is not worth the complexity.
 	 */
-	if (!ruleset)
-		return commit_creds(new_cred);
+	if (ruleset) {
+		/*
+		 * There is no possible race condition while copying and
+		 * manipulating the current credentials because they are
+		 * dedicated per thread.
+		 */
+		new_dom = landlock_merge_ruleset(new_llcred->domain, ruleset);
+		if (IS_ERR(new_dom)) {
+			abort_creds(new_cred);
+			return PTR_ERR(new_dom);
+		}
 
-	/*
-	 * There is no possible race condition while copying and manipulating
-	 * the current credentials because they are dedicated per thread.
-	 */
-	new_dom = landlock_merge_ruleset(new_llcred->domain, ruleset);
-	if (IS_ERR(new_dom)) {
-		abort_creds(new_cred);
-		return PTR_ERR(new_dom);
+#ifdef CONFIG_AUDIT
+		new_dom->hierarchy->log_same_exec = log_same_exec;
+		new_dom->hierarchy->log_new_exec = log_new_exec;
+		if ((!log_same_exec && !log_new_exec) || !prev_log_subdomains)
+			new_dom->hierarchy->log_status = LANDLOCK_LOG_DISABLED;
+#endif /* CONFIG_AUDIT */
+
+		/* Replaces the old (prepared) domain. */
+		landlock_put_ruleset(new_llcred->domain);
+		new_llcred->domain = new_dom;
+
+#ifdef CONFIG_AUDIT
+		new_llcred->domain_exec |= BIT(new_dom->num_layers - 1);
+#endif /* CONFIG_AUDIT */
 	}
-
-#ifdef CONFIG_AUDIT
-	new_dom->hierarchy->log_same_exec = log_same_exec;
-	new_dom->hierarchy->log_new_exec = log_new_exec;
-	if ((!log_same_exec && !log_new_exec) || !prev_log_subdomains)
-		new_dom->hierarchy->log_status = LANDLOCK_LOG_DISABLED;
-#endif /* CONFIG_AUDIT */
-
-	/* Replaces the old (prepared) domain. */
-	landlock_put_ruleset(new_llcred->domain);
-	new_llcred->domain = new_dom;
-
-#ifdef CONFIG_AUDIT
-	new_llcred->domain_exec |= BIT(new_dom->num_layers - 1);
-#endif /* CONFIG_AUDIT */
 
 	if (flags & LANDLOCK_RESTRICT_SELF_TSYNC) {
 		err = landlock_restrict_sibling_threads(current_cred(),
