@@ -99,4 +99,43 @@ TEST(multi_threaded_success_despite_diverging_domains)
 	ASSERT_EQ(0, close(ruleset_fd));
 }
 
+struct thread_restrict_data {
+	pthread_t t;
+	int ruleset_fd;
+	int result;
+};
+
+void *thread_restrict(void *data)
+{
+	struct thread_restrict_data *d = data;
+	d->result = landlock_restrict_self(d->ruleset_fd,
+					   LANDLOCK_RESTRICT_SELF_TSYNC);
+	return NULL;
+}
+
+TEST(competing_enablement)
+{
+	const int ruleset_fd = create_ruleset(_metadata);
+	struct thread_restrict_data d[] = {
+		{ .ruleset_fd = ruleset_fd },
+		{ .ruleset_fd = ruleset_fd },
+	};
+
+	disable_caps(_metadata);
+
+	ASSERT_EQ(0, prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
+	ASSERT_EQ(0, pthread_create(&d[0].t, NULL, thread_restrict, &d[0]));
+	ASSERT_EQ(0, pthread_create(&d[1].t, NULL, thread_restrict, &d[1]));
+
+	/* Wait for threads to finish. */
+	ASSERT_EQ(0, pthread_join(d[0].t, NULL));
+	ASSERT_EQ(0, pthread_join(d[1].t, NULL));
+
+	/* Expect that both succeeded. */
+	EXPECT_EQ(0, d[0].result);
+	EXPECT_EQ(0, d[1].result);
+
+	ASSERT_EQ(0, close(ruleset_fd));
+}
+
 TEST_HARNESS_MAIN
