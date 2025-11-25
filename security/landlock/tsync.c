@@ -382,6 +382,34 @@ static bool schedule_task_work(struct tsync_works *works,
 }
 
 /*
+ * cancel_tsync_works - cancel all task works where it is possible
+ *
+ * Task works can be canceled as long as they are still queued and have not
+ * started running.  If they get canceled, we decrement
+ * shared_ctx->num_preparing and shared_ctx->num_unfished and mark the two
+ * completions if needed, as if the task was never scheduled.
+ */
+static void cancel_tsync_works(struct tsync_works *works,
+			       struct tsync_shared_context *shared_ctx)
+{
+	int i;
+
+	for (i = 0; i < works->size; i++) {
+		if (!task_work_cancel(works->works[i]->task,
+				      &works->works[i]->work))
+			continue;
+
+		/* After dequeueing, act as if the task work had executed. */
+
+		if (atomic_dec_return(&shared_ctx->num_preparing) == 0)
+			complete_all(&shared_ctx->all_prepared);
+
+		if (atomic_dec_return(&shared_ctx->num_unfinished) == 0)
+			complete_all(&shared_ctx->all_finished);
+	}
+}
+
+/*
  * restrict_sibling_threads - enables a Landlock policy for all sibling threads
  */
 int landlock_restrict_sibling_threads(const struct cred *old_cred,
@@ -461,8 +489,31 @@ int landlock_restrict_sibling_threads(const struct cred *old_cred,
 		 * Decrement num_preparing for current, to undo that we
 		 * initialized it to 1 a few lines above.
 		 */
-		if (atomic_dec_return(&shared_ctx.num_preparing) > 0)
-			wait_for_completion(&shared_ctx.all_prepared);
+		if (atomic_dec_return(&shared_ctx.num_preparing) > 0) {
+			if (wait_for_completion_interruptible(
+				    &shared_ctx.all_prepared)) {
+				/*
+				 * In case of interruption, we need to retry the
+				 * system call.
+				 */
+				atomic_set(&shared_ctx.preparation_error,
+					   -ERESTARTNOINTR);
+
+				/*
+				 * Cancel task works for tasks that did not
+				 * start running yet, and decrement all_prepared
+				 * and num_unfinished accordingly.
+				 */
+				cancel_tsync_works(&works, &shared_ctx);
+
+				/*
+				 * The remaining task works have started
+				 * running, so waiting for their completion will
+				 * finish.
+				 */
+				wait_for_completion(&shared_ctx.all_prepared);
+			}
+		}
 	} while (found_more_threads &&
 		 !atomic_read(&shared_ctx.preparation_error));
 
