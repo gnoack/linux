@@ -118,8 +118,17 @@ struct landlock_ruleset_attr {
  *     with a @ruleset_fd value of -1 to mute subdomain logs without creating a
  *     domain.
  *
+ * The following flag supports policy enforcement in multithreaded processes:
+ *
  * %LANDLOCK_RESTRICT_SELF_TSYNC
- *    Apply the given ruleset atomically to all threads of the current process.
+ *     Applies the new Landlock configuration atomically to all threads of the
+ *     current process, including the Landlock domain and logging
+ *     configuration. This overrides the Landlock configuration of sibling
+ *     threads, irrespective of previously established Landlock domains and
+ *     logging configurations on these threads.
+ *
+ *     If the calling thread is running with no_new_privs, this operation
+ *     enables no_new_privs on the sibling threads as well.
  */
 /* clang-format off */
 #define LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF		(1U << 0)

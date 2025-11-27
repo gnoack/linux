@@ -462,13 +462,6 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
  * namespace or is running with no_new_privs.  This avoids scenarios where
  * unprivileged tasks can affect the behavior of privileged children.
  *
- * If %LANDLOCK_RESTRICT_SELF_TSYNC is specified in @flags, all other threads of
- * the process will be brought into the exact same Landlock configuration as the
- * calling thread.  This includes both the enforced ruleset and logging
- * configuration, and happens irrespective of previously established rulesets
- * and logging configurations on these threads.  If required, this operation
- * also enables the no_new_privs flag for these threads.
- *
  * Possible returned errors are:
  *
  * - %EOPNOTSUPP: Landlock is supported by the kernel but disabled at boot time;
