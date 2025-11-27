@@ -26,6 +26,8 @@
  * This structure is packed to minimize the size of struct
  * landlock_file_security.  However, it is always aligned in the LSM cred blob,
  * see lsm_set_blob_size().
+ *
+ * When updating this, also update landlock_cred_copy() if needed.
  */
 struct landlock_cred_security {
 	/**
