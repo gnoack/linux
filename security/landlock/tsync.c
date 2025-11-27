@@ -462,6 +462,20 @@ int landlock_restrict_sibling_threads(const struct cred *old_cred,
 	 *
 	 * 5) signals that it's done altogether (barrier synchronization
 	 *    "all_finished")
+	 *
+	 * Unlike seccomp, which modifies sibling tasks directly, we do not need
+	 * to acquire the cred_guard_mutex and sighand->siglock:
+	 *
+	 * * As in our case, all threads are themselves exchanging their own
+	 *   struct cred through the credentials API, no locks are needed for
+	 *   that.
+	 * * Our for_each_thread() loops are protected by RCU.
+	 * * We do not acquire a lock to keep the list of sibling threads stable
+	 *   between our for_each_thread loops.  If the list of available
+	 *   sibling threads changes between these for_each_thread loops, we
+	 *   make up for that by continuing to look for threads until they are
+	 *   all discovered and have entered their task_work, where they are
+	 *   unable to spawn new threads.
 	 */
 	do {
 		/* In RCU read-lock, count the threads we need. */
