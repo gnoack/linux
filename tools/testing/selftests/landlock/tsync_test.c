@@ -42,23 +42,36 @@ TEST(single_threaded_success)
 	ASSERT_EQ(0, close(ruleset_fd));
 }
 
+void store_no_new_privs(void *data)
+{
+	bool *nnp = data;
+	if (!nnp)
+		return;
+	*nnp = prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
+}
+
 void *idle(void *data)
 {
+	pthread_cleanup_push(store_no_new_privs, data);
+
 	while (true)
 		sleep(1);
+
+	pthread_cleanup_pop(1);
 }
 
 TEST(multi_threaded_success)
 {
 	pthread_t t1, t2;
+	bool no_new_privs1, no_new_privs2;
 	const int ruleset_fd = create_ruleset(_metadata);
 
 	disable_caps(_metadata);
 
-	ASSERT_EQ(0, prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
+	ASSERT_EQ(0, pthread_create(&t1, NULL, idle, &no_new_privs1));
+	ASSERT_EQ(0, pthread_create(&t2, NULL, idle, &no_new_privs2));
 
-	ASSERT_EQ(0, pthread_create(&t1, NULL, idle, NULL));
-	ASSERT_EQ(0, pthread_create(&t2, NULL, idle, NULL));
+	ASSERT_EQ(0, prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
 
 	EXPECT_EQ(0, landlock_restrict_self(ruleset_fd,
 					    LANDLOCK_RESTRICT_SELF_TSYNC));
@@ -67,6 +80,11 @@ TEST(multi_threaded_success)
 	ASSERT_EQ(0, pthread_cancel(t2));
 	ASSERT_EQ(0, pthread_join(t1, NULL));
 	ASSERT_EQ(0, pthread_join(t2, NULL));
+
+	/* The no_new_privs flag was implicitly enabled on all threads. */
+	EXPECT_TRUE(no_new_privs1);
+	EXPECT_TRUE(no_new_privs2);
+
 	ASSERT_EQ(0, close(ruleset_fd));
 }
 
