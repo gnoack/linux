@@ -21,6 +21,9 @@ struct tsync_shared_context {
 	const struct cred *old_cred;
 	const struct cred *new_cred;
 
+	/* True if sibling tasks need to set the no_new_privs flag. */
+	bool set_no_new_privs;
+
 	/* An error encountered in preparation step, or 0. */
 	atomic_t preparation_error;
 
@@ -122,8 +125,12 @@ static void restrict_one_thread(struct tsync_shared_context *ctx)
 		goto out;
 	}
 
-	/* If needed, establish enforcement prerequisites. */
-	if (!ns_capable_noaudit(current_user_ns(), CAP_SYS_ADMIN))
+	/*
+	 * Make sure that all sibling tasks fulfill the no_new_privs
+	 * prerequisite.  (This is in line with Seccomp's
+	 * SECCOMP_FILTER_FLAG_TSYNC logic in kernel/seccomp.c.)
+	 */
+	if (ctx->set_no_new_privs)
 		task_set_no_new_privs(current);
 
 	commit_creds(cred);
@@ -422,6 +429,8 @@ int landlock_restrict_sibling_threads(const struct cred *old_cred,
 	size_t newly_discovered_threads;
 	bool found_more_threads;
 
+	caller = current;
+
 	atomic_set(&shared_ctx.preparation_error, 0);
 	init_completion(&shared_ctx.all_prepared);
 	init_completion(&shared_ctx.ready_to_commit);
@@ -429,8 +438,7 @@ int landlock_restrict_sibling_threads(const struct cred *old_cred,
 	init_completion(&shared_ctx.all_finished);
 	shared_ctx.old_cred = old_cred;
 	shared_ctx.new_cred = new_cred;
-
-	caller = current;
+	shared_ctx.set_no_new_privs = task_no_new_privs(caller);
 
 	/*
 	 * We schedule a pseudo-signal task_work for each of the calling task's
