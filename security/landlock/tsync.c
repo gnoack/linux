@@ -423,13 +423,10 @@ int landlock_restrict_sibling_threads(const struct cred *old_cred,
 				      const struct cred *new_cred)
 {
 	int err;
-	struct task_struct *caller;
 	struct tsync_shared_context shared_ctx;
 	struct tsync_works works = {};
 	size_t newly_discovered_threads;
 	bool found_more_threads;
-
-	caller = current;
 
 	atomic_set(&shared_ctx.preparation_error, 0);
 	init_completion(&shared_ctx.all_prepared);
@@ -438,7 +435,7 @@ int landlock_restrict_sibling_threads(const struct cred *old_cred,
 	init_completion(&shared_ctx.all_finished);
 	shared_ctx.old_cred = old_cred;
 	shared_ctx.new_cred = new_cred;
-	shared_ctx.set_no_new_privs = task_no_new_privs(caller);
+	shared_ctx.set_no_new_privs = task_no_new_privs(current);
 
 	/*
 	 * We schedule a pseudo-signal task_work for each of the calling task's
