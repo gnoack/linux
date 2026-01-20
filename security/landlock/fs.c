@@ -1040,7 +1040,6 @@ static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
 				    struct dentry *dir,
 				    struct layer_access_masks *layer_masks_dom)
 {
-	unsigned long access_dom;
 	bool ret = false;
 
 	if (WARN_ON_ONCE(!domain || !mnt_root || !dir || !layer_masks_dom))
@@ -1048,9 +1047,9 @@ static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
 	if (is_nouser_or_private(dir))
 		return true;
 
-	access_dom = landlock_init_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
-					       layer_masks_dom,
-					       LANDLOCK_KEY_INODE);
+	if (!landlock_init_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
+				       layer_masks_dom, LANDLOCK_KEY_INODE))
+		return true;
 
 	dget(dir);
 	while (true) {
