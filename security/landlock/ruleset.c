@@ -612,13 +612,18 @@ landlock_find_rule(const struct landlock_ruleset *const ruleset,
 	return NULL;
 }
 
-/*
- * @layer_masks is read and may be updated according to the access request and
- * the matching rule.
- * @masks_array_size must be equal to ARRAY_SIZE(*layer_masks).
+/**
+ * landlock_unmask_layers - Cross off access rights granted in @rule in @masks
  *
- * Returns true if the request is allowed (i.e. relevant layer masks for the
- * request are empty).
+ * Updates the set of (per-layer) unfulfilled access rights @masks
+ * so that all the access rights granted in @rule are removed from it
+ * (because they are now fulfilled).
+ *
+ * @rule: A rule that grants a set of access rights for each layer
+ * @masks: A matrix of unfulfilled access rights for each layer
+ *
+ * Returns true if the request is allowed (i.e. the access rights granted all
+ * remaining unfulfilled access rights and masks has no leftover set bits).
  */
 bool landlock_unmask_layers(const struct landlock_rule *const rule,
 			    struct layer_access_masks *masks)
@@ -628,13 +633,24 @@ bool landlock_unmask_layers(const struct landlock_rule *const rule,
 	if (!rule)
 		return false;
 
-	for (int i = 0; i < rule->num_layers; i++) {
-		const struct landlock_layer *l = &rule->layers[i];
+	/*
+	 * An access is granted if, for each policy layer, at least one rule
+	 * encountered on the pathwalk grants the requested access,
+	 * regardless of its position in the layer stack.  We must then check
+	 * the remaining layers for each inode, from the first added layer to
+	 * the last one.  When there is multiple requested accesses, for each
+	 * policy layer, the full set of requested accesses may not be granted
+	 * by only one rule, but by the union (binary OR) of multiple rules.
+	 * E.g. /a/b <execute> + /a <read> => /a/b <execute + read>
+	 */
+	for (size_t i = 0; i < rule->num_layers; i++) {
+		const struct landlock_layer *const layer = &rule->layers[i];
 
-		masks->access[l->level - 1] &= ~l->access;
+		/* Clear the bits where the layer in the rule grants access. */
+		masks->access[layer->level - 1] &= ~layer->access;
 	}
 
-	for (int i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(masks->access); i++) {
 		if (masks->access[i])
 			return false;
 	}
@@ -648,7 +664,7 @@ get_access_mask_t(const struct landlock_ruleset *const ruleset,
 /**
  * landlock_init_layer_masks - Initialize layer masks from an access request
  *
- * Populates @layer_masks such that for each access right in @access_request,
+ * Populates @masks such that for each access right in @access_request,
  * the bits for all the layers are set where this access right is handled.
  *
  * @domain: The domain that defines the current restrictions.
@@ -662,7 +678,7 @@ get_access_mask_t(const struct landlock_ruleset *const ruleset,
 access_mask_t
 landlock_init_layer_masks(const struct landlock_ruleset *const domain,
 			  const access_mask_t access_request,
-			  struct layer_access_masks *masks,
+			  struct layer_access_masks *const masks,
 			  const enum landlock_key_type key_type)
 {
 	access_mask_t handled_accesses = 0;
@@ -688,13 +704,13 @@ landlock_init_layer_masks(const struct landlock_ruleset *const domain,
 	if (!access_request)
 		return 0;
 
-	for (int i = 0; i < domain->num_layers; i++) {
+	for (size_t i = 0; i < domain->num_layers; i++) {
 		const access_mask_t handled = get_access_mask(domain, i);
 
 		masks->access[i] = access_request & handled;
 		handled_accesses |= masks->access[i];
 	}
-	for (int i = domain->num_layers; i < LANDLOCK_MAX_NUM_LAYERS; i++)
+	for (size_t i = domain->num_layers; i < ARRAY_SIZE(masks->access); i++)
 		masks->access[i] = 0;
 
 	return handled_accesses;

@@ -196,6 +196,7 @@ static int current_check_access_socket(struct socket *const sock,
 						   LANDLOCK_KEY_NET_PORT);
 	if (!access_request)
 		return 0;
+
 	if (landlock_unmask_layers(rule, &layer_masks))
 		return 0;
 

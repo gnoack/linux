@@ -141,7 +141,7 @@ landlock_get_fs_deny_masks(const access_mask_t optional_access,
 	u8 truncate_layer = 0;
 	u8 ioctl_dev_layer = 0;
 
-	for (int i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(layer_masks->access); i++) {
 		if (layer_masks->access[i] & optional_access &
 		    LANDLOCK_ACCESS_FS_TRUNCATE)
 			truncate_layer = i;

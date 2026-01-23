@@ -185,7 +185,7 @@ static size_t get_denied_layer(const struct landlock_ruleset *const domain,
 			       access_mask_t *const access_request,
 			       const struct layer_access_masks *masks)
 {
-	for (int i = LANDLOCK_MAX_NUM_LAYERS - 1; i >= 0; i--) {
+	for (size_t i = ARRAY_SIZE(masks->access) - 1; i >= 0; i--) {
 		if (masks->access[i] & *access_request) {
 			*access_request &= masks->access[i];
 			return i;
@@ -264,6 +264,7 @@ static size_t get_layer_from_fs_deny_masks(access_mask_t *const access_request,
 		missing |= LANDLOCK_ACCESS_FS_TRUNCATE;
 		youngest_layer = max(youngest_layer, layer);
 	}
+
 	if (access_req & LANDLOCK_ACCESS_FS_IOCTL_DEV) {
 		size_t layer = (deny_masks & 0xf0) >> 4;
 
@@ -273,6 +274,7 @@ static size_t get_layer_from_fs_deny_masks(access_mask_t *const access_request,
 		missing |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
 		youngest_layer = max(youngest_layer, layer);
 	}
+
 	*access_request = missing;
 	return youngest_layer;
 }

@@ -417,7 +417,7 @@ static bool may_refer(const struct layer_access_masks *const src_parent,
 		      const struct layer_access_masks *const new_parent,
 		      const bool child_is_dir)
 {
-	for (int i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(new_parent->access); i++) {
 		access_mask_t child_access = src_parent->access[i] &
 					     src_child->access[i];
 		access_mask_t parent_access = new_parent->access[i];
@@ -589,7 +589,7 @@ static bool scope_to_request(const access_mask_t access_request,
 	if (WARN_ON_ONCE(!masks))
 		return true;
 
-	for (int i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(masks->access); i++) {
 		masks->access[i] &= access_request;
 		if (masks->access[i])
 			saw_unfulfilled_access = true;
@@ -651,7 +651,7 @@ static bool is_eacces(const struct layer_access_masks *masks,
 	if (!masks)
 		return false;
 
-	for (int i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(masks->access); i++) {
 		/* LANDLOCK_ACCESS_FS_REFER alone must return -EXDEV. */
 		if (masks->access[i] & access_request &
 		    ~LANDLOCK_ACCESS_FS_REFER)
@@ -1663,7 +1663,7 @@ static int hook_file_open(struct file *const file)
 		 * are still unfulfilled in any of the layers.
 		 */
 		allowed_access = full_access_request;
-		for (int i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++)
+		for (size_t i = 0; i < ARRAY_SIZE(layer_masks.access); i++)
 			allowed_access &= ~layer_masks.access[i];
 	}
 
