@@ -1666,8 +1666,8 @@ static int hook_file_open(struct file *const file)
 	 */
 	landlock_file(file)->allowed_access = allowed_access;
 #ifdef CONFIG_AUDIT
-	landlock_file(file)->deny_masks = landlock_get_deny_masks(
-		_LANDLOCK_ACCESS_FS_OPTIONAL, optional_access, &layer_masks);
+	landlock_file(file)->deny_masks =
+		landlock_get_fs_deny_masks(optional_access, &layer_masks);
 #endif /* CONFIG_AUDIT */
 
 	if (access_mask_subset(open_access_request, allowed_access))
