@@ -399,15 +399,6 @@ static const struct access_masks any_fs = {
 };
 
 /*
- * Returns true iff a has a subset of the bits of b.
- * It helps readability and gets inlined.
- */
-static bool access_mask_subset(access_mask_t a, access_mask_t b)
-{
-	return (a | b) == b;
-}
-
-/*
  * Returns true iff the child file with the given src_child access rights under
  * src_parent would result in having the same or fewer access rights if it were
  * moved under new_parent.
@@ -1675,8 +1666,8 @@ static int hook_file_open(struct file *const file)
 	 */
 	landlock_file(file)->allowed_access = allowed_access;
 #ifdef CONFIG_AUDIT
-	landlock_file(file)->deny_masks =
-		landlock_get_fs_deny_masks(optional_access, &layer_masks);
+	landlock_file(file)->deny_masks = landlock_get_deny_masks(
+		_LANDLOCK_ACCESS_FS_OPTIONAL, optional_access, &layer_masks);
 #endif /* CONFIG_AUDIT */
 
 	if (access_mask_subset(open_access_request, allowed_access))

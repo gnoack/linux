@@ -10,6 +10,7 @@
 #ifndef _SECURITY_LANDLOCK_DOMAIN_H
 #define _SECURITY_LANDLOCK_DOMAIN_H
 
+#include "ruleset.h"
 #include <linux/limits.h>
 #include <linux/mm.h>
 #include <linux/path.h>
@@ -120,8 +121,9 @@ struct landlock_hierarchy {
 #ifdef CONFIG_AUDIT
 
 deny_masks_t
-landlock_get_fs_deny_masks(const access_mask_t optional_access,
-			   const struct layer_access_masks *layer_masks);
+landlock_get_deny_masks(const access_mask_t all_existing_optional_access,
+			const access_mask_t optional_access,
+			const struct layer_access_masks *const masks);
 
 int landlock_init_hierarchy_log(struct landlock_hierarchy *const hierarchy);
 
