@@ -229,18 +229,13 @@ static inline void landlock_get_ruleset(struct landlock_ruleset *const ruleset)
 static inline struct access_masks
 landlock_union_access_masks(const struct landlock_ruleset *const domain)
 {
-	union access_masks_all matches = {};
+	struct access_masks matches = {};
 	size_t layer_level;
 
-	for (layer_level = 0; layer_level < domain->num_layers; layer_level++) {
-		union access_masks_all layer = {
-			.masks = domain->access_masks[layer_level],
-		};
+	for (layer_level = 0; layer_level < domain->num_layers; layer_level++)
+		access_masks_merge(&matches, domain->access_masks[layer_level]);
 
-		matches.all |= layer.all;
-	}
-
-	return matches.masks;
+	return matches;
 }
 
 static inline void

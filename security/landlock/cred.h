@@ -123,9 +123,6 @@ landlock_get_applicable_subject(const struct cred *const cred,
 				const struct access_masks masks,
 				size_t *const handle_layer)
 {
-	const union access_masks_all masks_all = {
-		.masks = masks,
-	};
 	const struct landlock_ruleset *domain;
 	ssize_t layer_level;
 
@@ -138,11 +135,8 @@ landlock_get_applicable_subject(const struct cred *const cred,
 
 	for (layer_level = domain->num_layers - 1; layer_level >= 0;
 	     layer_level--) {
-		union access_masks_all layer = {
-			.masks = domain->access_masks[layer_level],
-		};
-
-		if (layer.all & masks_all.all) {
+		if (access_masks_intersect(domain->access_masks[layer_level],
+					   masks)) {
 			if (handle_layer)
 				*handle_layer = layer_level;
 

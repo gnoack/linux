@@ -52,14 +52,21 @@ struct access_masks {
 	access_mask_t scope : LANDLOCK_NUM_SCOPE;
 };
 
-union access_masks_all {
-	struct access_masks masks;
-	u32 all;
-};
+/* Checks whether two access masks have any common bit set. */
+static inline bool access_masks_intersect(const struct access_masks a,
+					  const struct access_masks b)
+{
+	return (a.fs & b.fs) || (a.net & b.net) || (a.scope & b.scope);
+}
 
-/* Makes sure all fields are covered. */
-static_assert(sizeof(typeof_member(union access_masks_all, masks)) ==
-	      sizeof(typeof_member(union access_masks_all, all)));
+/* ORs the bits of @src into @dst. */
+static inline void access_masks_merge(struct access_masks *dst,
+				      const struct access_masks src)
+{
+	dst->fs |= src.fs;
+	dst->net |= src.net;
+	dst->scope |= src.scope;
+}
 
 /**
  * struct layer_access_masks - A boolean matrix of layers and access rights
