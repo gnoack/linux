@@ -2247,6 +2247,19 @@ TEST_F_FORK(layout1, rename_file)
 			       RENAME_EXCHANGE));
 }
 
+TEST_F_FORK(layout1, rename_whiteout_denied)
+{
+	enforce_fs(_metadata, LANDLOCK_ACCESS_FS_MAKE_CHAR, NULL);
+
+	/*
+	 * Try to rename a file with RENAME_WHITEOUT.
+	 * file1_s3d3 is in dir_s3d2 (tmpfs), so it supports RENAME_WHITEOUT.
+	 */
+	EXPECT_EQ(-1, renameat2(AT_FDCWD, file1_s3d3, AT_FDCWD,
+				TMP_DIR "/s3d1/s3d2/s3d3/f2", RENAME_WHITEOUT));
+	EXPECT_EQ(EACCES, errno);
+}
+
 TEST_F_FORK(layout1, rename_dir)
 {
 	const struct rule rules[] = {
@@ -6948,6 +6961,7 @@ TEST_F_FORK(layout2_overlay, same_content_different_file)
 		ASSERT_EQ(0, test_open(path_entry, O_RDWR));
 	}
 }
+
 
 FIXTURE(layout3_fs)
 {
