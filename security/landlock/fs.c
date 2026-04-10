@@ -1523,11 +1523,14 @@ static int hook_path_rename(const struct path *const old_dir,
 		int err;
 
 		/*
-		 * This check would better be done together with other path
-		 * walks which are already happening for the normal rename check
-		 * in current_check_refer_path().
+		 * Rename with RENAME_WHITEOUT creates a whiteout object
+		 * (character device file with major=minor=0) in the old
+		 * location, so we check the access right for creating that.
+		 *
+		 * See Documentation/filesystems/overlayfs.rst and renameat2(2).
 		 */
-		err = current_check_access_path(old_dir, LANDLOCK_ACCESS_FS_MAKE_CHAR);
+		err = current_check_access_path(old_dir,
+						LANDLOCK_ACCESS_FS_MAKE_CHAR);
 		if (err)
 			return err;
 	}
