@@ -198,14 +198,19 @@ static int current_check_access_socket(struct socket *const sock,
 		return 0;
 
 	audit_net.family = address->sa_family;
-	landlock_log_denial(subject,
-			    &(struct landlock_request){
-				    .type = LANDLOCK_REQUEST_NET_ACCESS,
-				    .audit.type = LSM_AUDIT_DATA_NET,
-				    .audit.u.net = &audit_net,
-				    .access = access_request,
-				    .layer_masks = &layer_masks,
-			    });
+	{
+		size_t denying_layer = landlock_get_denied_layer(
+			subject->domain, &access_request, &layer_masks);
+
+		landlock_log_denial(subject,
+				    &(struct landlock_request){
+					    .type = LANDLOCK_REQUEST_NET_ACCESS,
+					    .audit.type = LSM_AUDIT_DATA_NET,
+					    .audit.u.net = &audit_net,
+					    .access = access_request,
+					    .layer_plus_one = denying_layer + 1,
+				    });
+	}
 	return -EACCES;
 }
 

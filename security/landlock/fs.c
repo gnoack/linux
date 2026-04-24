@@ -954,12 +954,19 @@ is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
 	 * associated caller's stack variables thanks to dead code elimination.
 	 */
 #ifdef CONFIG_AUDIT
+	/*
+	 * Fill in the type, path and the broad access mask that was checked.
+	 * Callers are responsible for narrowing @access to the bits that were
+	 * actually denied and for populating @layer_plus_one (usually via
+	 * landlock_get_denied_layer()) before calling landlock_log_denial();
+	 * a non-zero @access on return is also the caller-facing signal that
+	 * a given parent was denied.
+	 */
 	if (!allowed_parent1 && log_request_parent1) {
 		log_request_parent1->type = LANDLOCK_REQUEST_FS_ACCESS;
 		log_request_parent1->audit.type = LSM_AUDIT_DATA_PATH;
 		log_request_parent1->audit.u.path = *path;
 		log_request_parent1->access = access_masked_parent1;
-		log_request_parent1->layer_masks = layer_masks_parent1;
 	}
 
 	if (!allowed_parent2 && log_request_parent2) {
@@ -967,7 +974,6 @@ is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
 		log_request_parent2->audit.type = LSM_AUDIT_DATA_PATH;
 		log_request_parent2->audit.u.path = *path;
 		log_request_parent2->access = access_masked_parent2;
-		log_request_parent2->layer_masks = layer_masks_parent2;
 	}
 #endif /* CONFIG_AUDIT */
 
@@ -996,6 +1002,11 @@ static int current_check_access_path(const struct path *const path,
 				       NULL, NULL))
 		return 0;
 
+	request.access = access_request;
+	request.layer_plus_one =
+		landlock_get_denied_layer(subject->domain, &request.access,
+					  &layer_masks) +
+		1;
 	landlock_log_denial(subject, &request);
 	return -EACCES;
 }
@@ -1207,6 +1218,11 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 					       NULL, 0, NULL, NULL, NULL))
 			return 0;
 
+		request1.layer_plus_one =
+			landlock_get_denied_layer(subject->domain,
+						  &request1.access,
+						  &layer_masks_parent1) +
+			1;
 		landlock_log_denial(subject, &request1);
 		return -EACCES;
 	}
@@ -1253,10 +1269,20 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 
 	if (request1.access) {
 		request1.audit.u.path.dentry = old_parent;
+		request1.layer_plus_one =
+			landlock_get_denied_layer(subject->domain,
+						  &request1.access,
+						  &layer_masks_parent1) +
+			1;
 		landlock_log_denial(subject, &request1);
 	}
 	if (request2.access) {
 		request2.audit.u.path.dentry = new_dir->dentry;
+		request2.layer_plus_one =
+			landlock_get_denied_layer(subject->domain,
+						  &request2.access,
+						  &layer_masks_parent2) +
+			1;
 		landlock_log_denial(subject, &request2);
 	}
 
@@ -1715,6 +1741,10 @@ static int hook_unix_find(const struct path *const path, struct sock *other,
 				       &request, NULL, 0, NULL, NULL, NULL))
 		return 0;
 
+	request.layer_plus_one = landlock_get_denied_layer(subject->domain,
+							   &request.access,
+							   &layer_masks) +
+				 1;
 	landlock_log_denial(subject, &request);
 	return -EACCES;
 }
@@ -1833,6 +1863,10 @@ static int hook_file_open(struct file *const file)
 
 	/* Sets access to reflect the actual request. */
 	request.access = open_access_request;
+	request.layer_plus_one = landlock_get_denied_layer(subject->domain,
+							   &request.access,
+							   &layer_masks) +
+				 1;
 	landlock_log_denial(subject, &request);
 	return -EACCES;
 }

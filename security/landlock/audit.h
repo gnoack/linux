@@ -42,13 +42,15 @@ struct landlock_request {
 	/* Required field for configurable access control. */
 	access_mask_t access;
 
-	/* Required fields for requests with layer masks. */
-	const struct layer_access_masks *layer_masks;
-
 	/* Required fields for requests with deny masks. */
 	const access_mask_t all_existing_optional_access;
 	deny_masks_t deny_masks;
 };
+
+size_t
+landlock_get_denied_layer(const struct landlock_ruleset *const domain,
+			  access_mask_t *const access_request,
+			  const struct layer_access_masks *const masks);
 
 #ifdef CONFIG_AUDIT
 
