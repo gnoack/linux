@@ -980,34 +980,77 @@ is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
 	return allowed_parent1 && allowed_parent2;
 }
 
+/**
+ * walk_path_simple - Per-layer path walk for a non-refer access check
+ *
+ * @domain: Domain to check against.
+ * @path: File hierarchy to walk upward.
+ * @access_request: Requested access bits.
+ * @unfulfilled_out: On denial, set to the deepest denying layer's remaining
+ *     bits (intersection of the requested accesses and what that layer
+ *     handled but did not grant anywhere along @path).
+ * @denying_layer_out: On denial, set to that layer's zero-based index.
+ *
+ * Return: True if the request is granted (no layer denies any requested
+ * bit), false otherwise.  On false, the output parameters carry the
+ * information the caller needs to build an audit record.
+ */
+static bool walk_path_simple(const struct landlock_ruleset *const domain,
+			     const struct path *const path,
+			     const access_mask_t access_request,
+			     access_mask_t *const unfulfilled_out,
+			     size_t *const denying_layer_out)
+{
+	bool any_unfulfilled = false;
+
+	*unfulfilled_out = 0;
+	*denying_layer_out = 0;
+
+	if (is_nouser_or_private(path->dentry))
+		return true;
+
+	for (u16 i = 0; i < domain->num_layers; i++) {
+		const access_mask_t initial =
+			landlock_get_fs_access_mask(domain, i) & access_request;
+		const access_mask_t remaining =
+			walk_layer(domain, path, i, initial);
+
+		if (remaining) {
+			*unfulfilled_out = remaining;
+			*denying_layer_out = i;
+			any_unfulfilled = true;
+		}
+	}
+
+	return !any_unfulfilled;
+}
+
 static int current_check_access_path(const struct path *const path,
-				     access_mask_t access_request)
+				     const access_mask_t access_request)
 {
 	const struct access_masks masks = {
 		.fs = access_request,
 	};
 	const struct landlock_cred_security *const subject =
 		landlock_get_applicable_subject(current_cred(), masks, NULL);
-	struct layer_access_masks layer_masks;
-	struct landlock_request request = {};
+	access_mask_t unfulfilled;
+	size_t denying_layer;
 
 	if (!subject)
 		return 0;
 
-	access_request = landlock_init_layer_masks(subject->domain,
-						   access_request, &layer_masks,
-						   LANDLOCK_KEY_INODE);
-	if (is_access_to_paths_allowed(subject->domain, path, access_request,
-				       &layer_masks, &request, NULL, 0, NULL,
-				       NULL, NULL))
+	if (walk_path_simple(subject->domain, path, access_request,
+			     &unfulfilled, &denying_layer))
 		return 0;
 
-	request.access = access_request;
-	request.layer_plus_one =
-		landlock_get_denied_layer(subject->domain, &request.access,
-					  &layer_masks) +
-		1;
-	landlock_log_denial(subject, &request);
+	landlock_log_denial(subject,
+			    &(struct landlock_request){
+				    .type = LANDLOCK_REQUEST_FS_ACCESS,
+				    .audit.type = LSM_AUDIT_DATA_PATH,
+				    .audit.u.path = *path,
+				    .access = unfulfilled,
+				    .layer_plus_one = denying_layer + 1,
+			    });
 	return -EACCES;
 }
 
