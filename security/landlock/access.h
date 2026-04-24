@@ -61,21 +61,6 @@ union access_masks_all {
 static_assert(sizeof(typeof_member(union access_masks_all, masks)) ==
 	      sizeof(typeof_member(union access_masks_all, all)));
 
-/**
- * struct layer_access_masks - A boolean matrix of layers and access rights
- *
- * This has a bit for each combination of layer numbers and access rights.
- * During access checks, it is used to represent the access rights for each
- * layer which still need to be fulfilled.  When all bits are 0, the access
- * request is considered to be fulfilled.
- */
-struct layer_access_masks {
-	/**
-	 * @access: The unfulfilled access rights for each layer.
-	 */
-	access_mask_t access[LANDLOCK_MAX_NUM_LAYERS];
-};
-
 /*
  * Tracks domains responsible of a denied access.  This avoids storing in each
  * object the full matrix of per-layer unfulfilled access rights, which is

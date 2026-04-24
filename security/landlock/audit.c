@@ -181,68 +181,6 @@ static void test_get_hierarchy(struct kunit *const test)
 
 #endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
 
-/* Get the youngest layer that denied the access_request. */
-size_t landlock_get_denied_layer(const struct landlock_ruleset *const domain,
-				 access_mask_t *const access_request,
-				 const struct layer_access_masks *const masks)
-{
-	for (ssize_t i = ARRAY_SIZE(masks->access) - 1; i >= 0; i--) {
-		if (masks->access[i] & *access_request) {
-			*access_request &= masks->access[i];
-			return i;
-		}
-	}
-
-	/* Not found - fall back to default values */
-	*access_request = 0;
-	return domain->num_layers - 1;
-}
-
-#ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
-
-static void test_get_denied_layer(struct kunit *const test)
-{
-	const struct landlock_ruleset dom = {
-		.num_layers = 5,
-	};
-	const struct layer_access_masks masks = {
-		.access[0] = LANDLOCK_ACCESS_FS_EXECUTE |
-			     LANDLOCK_ACCESS_FS_READ_DIR,
-		.access[1] = LANDLOCK_ACCESS_FS_READ_FILE |
-			     LANDLOCK_ACCESS_FS_READ_DIR,
-		.access[2] = LANDLOCK_ACCESS_FS_REMOVE_DIR,
-	};
-	access_mask_t access;
-
-	access = LANDLOCK_ACCESS_FS_EXECUTE;
-	KUNIT_EXPECT_EQ(test, 0, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_EXECUTE);
-
-	access = LANDLOCK_ACCESS_FS_READ_FILE;
-	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_READ_FILE);
-
-	access = LANDLOCK_ACCESS_FS_READ_DIR;
-	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_READ_DIR);
-
-	access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
-	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access,
-			LANDLOCK_ACCESS_FS_READ_FILE |
-				LANDLOCK_ACCESS_FS_READ_DIR);
-
-	access = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_DIR;
-	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_READ_DIR);
-
-	access = LANDLOCK_ACCESS_FS_WRITE_FILE;
-	KUNIT_EXPECT_EQ(test, 4, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access, 0);
-}
-
-#endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
-
 static size_t
 get_layer_from_deny_masks(access_mask_t *const access_request,
 			  const access_mask_t all_existing_optional_access,
@@ -479,7 +417,6 @@ void landlock_log_drop_domain(const struct landlock_hierarchy *const hierarchy)
 static struct kunit_case test_cases[] = {
 	/* clang-format off */
 	KUNIT_CASE(test_get_hierarchy),
-	KUNIT_CASE(test_get_denied_layer),
 	KUNIT_CASE(test_get_layer_from_deny_masks),
 	{}
 	/* clang-format on */

@@ -401,6 +401,146 @@ static const struct access_masks any_fs = {
 	.fs = ~0,
 };
 
+/**
+ * struct layer_access_masks - A boolean matrix of layers and access rights
+ *
+ * This has a bit for each combination of layer numbers and access rights.
+ * During refer (link / rename) checks, it is used to represent the access
+ * rights for each layer which still need to be fulfilled.  When all bits
+ * are 0, the access request is considered to be fulfilled.
+ *
+ * Only the refer code path still builds a full matrix; every other Landlock
+ * fs check works with plain access_mask_t arrays or scalars.
+ */
+struct layer_access_masks {
+	access_mask_t access[LANDLOCK_MAX_NUM_LAYERS];
+};
+
+/*
+ * Populate @masks such that each layer handling any of the requested bits
+ * gets those bits set.  Returns the union of bits that are handled by at
+ * least one layer.  Functionally equivalent to the former
+ * landlock_init_layer_masks() for LANDLOCK_KEY_INODE.
+ */
+static access_mask_t
+init_fs_layer_masks(const struct landlock_ruleset *const domain,
+		    const access_mask_t access_request,
+		    struct layer_access_masks *const masks)
+{
+	access_mask_t handled_accesses = 0;
+
+	/* An empty access request can happen because of O_WRONLY | O_RDWR. */
+	if (!access_request) {
+		memset(masks, 0, sizeof(*masks));
+		return 0;
+	}
+
+	for (size_t i = 0; i < domain->num_layers; i++) {
+		const access_mask_t handled =
+			landlock_get_fs_access_mask(domain, i);
+
+		masks->access[i] = access_request & handled;
+		handled_accesses |= masks->access[i];
+	}
+	for (size_t i = domain->num_layers; i < ARRAY_SIZE(masks->access); i++)
+		masks->access[i] = 0;
+
+	return handled_accesses;
+}
+
+/*
+ * Clear bits from each layer of @masks that @rule grants at that layer.
+ * Returns true when every layer is fully fulfilled.  Functionally
+ * equivalent to the former landlock_unmask_layers().
+ */
+static bool unmask_layers(const struct landlock_rule *const rule,
+			  struct layer_access_masks *const masks)
+{
+	if (!masks)
+		return true;
+	if (!rule)
+		return false;
+
+	for (size_t i = 0; i < rule->num_layers; i++) {
+		const struct landlock_layer *const layer = &rule->layers[i];
+
+		masks->access[layer->level - 1] &= ~layer->access;
+	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(masks->access); i++)
+		if (masks->access[i])
+			return false;
+	return true;
+}
+
+/*
+ * Find the youngest (deepest) layer that still has bits set in
+ * @access_request, narrow @access_request to that layer's bits, and
+ * return the layer's zero-based index.  When no layer has any matching
+ * bit, clear @access_request and return the deepest layer index; callers
+ * treat this as "all bits allowed".
+ */
+static size_t
+landlock_get_denied_layer(const struct landlock_ruleset *const domain,
+			  access_mask_t *const access_request,
+			  const struct layer_access_masks *const masks)
+{
+	for (ssize_t i = ARRAY_SIZE(masks->access) - 1; i >= 0; i--) {
+		if (masks->access[i] & *access_request) {
+			*access_request &= masks->access[i];
+			return i;
+		}
+	}
+
+	*access_request = 0;
+	return domain->num_layers - 1;
+}
+
+#ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
+
+static void test_get_denied_layer(struct kunit *const test)
+{
+	const struct landlock_ruleset dom = {
+		.num_layers = 5,
+	};
+	const struct layer_access_masks masks = {
+		.access[0] = LANDLOCK_ACCESS_FS_EXECUTE |
+			     LANDLOCK_ACCESS_FS_READ_DIR,
+		.access[1] = LANDLOCK_ACCESS_FS_READ_FILE |
+			     LANDLOCK_ACCESS_FS_READ_DIR,
+		.access[2] = LANDLOCK_ACCESS_FS_REMOVE_DIR,
+	};
+	access_mask_t access;
+
+	access = LANDLOCK_ACCESS_FS_EXECUTE;
+	KUNIT_EXPECT_EQ(test, 0, landlock_get_denied_layer(&dom, &access, &masks));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_EXECUTE);
+
+	access = LANDLOCK_ACCESS_FS_READ_FILE;
+	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_READ_FILE);
+
+	access = LANDLOCK_ACCESS_FS_READ_DIR;
+	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_READ_DIR);
+
+	access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
+	KUNIT_EXPECT_EQ(test, access,
+			LANDLOCK_ACCESS_FS_READ_FILE |
+				LANDLOCK_ACCESS_FS_READ_DIR);
+
+	access = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_DIR;
+	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_READ_DIR);
+
+	access = LANDLOCK_ACCESS_FS_WRITE_FILE;
+	KUNIT_EXPECT_EQ(test, 4, landlock_get_denied_layer(&dom, &access, &masks));
+	KUNIT_EXPECT_EQ(test, access, 0);
+}
+
+#endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
+
 /*
  * Collect the access bits granted to a single layer by @rule.  A rule
  * stores its layer entries in a sparse array, so iterate and merge the bits
@@ -884,20 +1024,18 @@ is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
 	}
 
 	if (unlikely(dentry_child1)) {
-		if (landlock_init_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
-					      &_layer_masks_child1,
-					      LANDLOCK_KEY_INODE))
-			landlock_unmask_layers(find_rule(domain, dentry_child1),
-					       &_layer_masks_child1);
+		if (init_fs_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
+					&_layer_masks_child1))
+			unmask_layers(find_rule(domain, dentry_child1),
+				      &_layer_masks_child1);
 		layer_masks_child1 = &_layer_masks_child1;
 		child1_is_directory = d_is_dir(dentry_child1);
 	}
 	if (unlikely(dentry_child2)) {
-		if (landlock_init_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
-					      &_layer_masks_child2,
-					      LANDLOCK_KEY_INODE))
-			landlock_unmask_layers(find_rule(domain, dentry_child2),
-					       &_layer_masks_child2);
+		if (init_fs_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
+					&_layer_masks_child2))
+			unmask_layers(find_rule(domain, dentry_child2),
+				      &_layer_masks_child2);
 		layer_masks_child2 = &_layer_masks_child2;
 		child2_is_directory = d_is_dir(dentry_child2);
 	}
@@ -1134,8 +1272,8 @@ static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
 	if (is_nouser_or_private(dir))
 		return true;
 
-	if (!landlock_init_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
-				       layer_masks_dom, LANDLOCK_KEY_INODE))
+	if (!init_fs_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
+				 layer_masks_dom))
 		return true;
 
 	/*
@@ -1265,10 +1403,10 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 		 * The LANDLOCK_ACCESS_FS_REFER access right is not required
 		 * for same-directory referer (i.e. no reparenting).
 		 */
-		access_request_parent1 = landlock_init_layer_masks(
+		access_request_parent1 = init_fs_layer_masks(
 			subject->domain,
 			access_request_parent1 | access_request_parent2,
-			&layer_masks_parent1, LANDLOCK_KEY_INODE);
+			&layer_masks_parent1);
 		if (is_access_to_paths_allowed(subject->domain, new_dir,
 					       access_request_parent1,
 					       &layer_masks_parent1, &request1,

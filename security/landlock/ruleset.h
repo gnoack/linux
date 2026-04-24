@@ -301,15 +301,6 @@ landlock_get_scope_mask(const struct landlock_ruleset *const ruleset,
 	return ruleset->access_masks[layer_level].scope;
 }
 
-bool landlock_unmask_layers(const struct landlock_rule *const rule,
-			    struct layer_access_masks *masks);
-
-access_mask_t
-landlock_init_layer_masks(const struct landlock_ruleset *const domain,
-			  const access_mask_t access_request,
-			  struct layer_access_masks *masks,
-			  const enum landlock_key_type key_type);
-
 /*
  * Collect the access bits granted to a single layer by @rule.  A rule
  * stores its layer entries in a sparse array; iterate and merge the bits

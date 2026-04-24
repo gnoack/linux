@@ -47,11 +47,6 @@ struct landlock_request {
 	deny_masks_t deny_masks;
 };
 
-size_t
-landlock_get_denied_layer(const struct landlock_ruleset *const domain,
-			  access_mask_t *const access_request,
-			  const struct layer_access_masks *const masks);
-
 #ifdef CONFIG_AUDIT
 
 void landlock_log_drop_domain(const struct landlock_hierarchy *const hierarchy);
