@@ -1695,7 +1695,7 @@ static int hook_path_truncate(const struct path *const path)
  */
 static void unmask_scoped_access(const struct landlock_ruleset *const client,
 				 const struct landlock_ruleset *const server,
-				 struct layer_access_masks *const masks,
+				 access_mask_t remaining[LANDLOCK_MAX_NUM_LAYERS],
 				 const access_mask_t access)
 {
 	int client_layer, server_layer;
@@ -1736,9 +1736,9 @@ static void unmask_scoped_access(const struct landlock_ruleset *const client,
 		server_walker = server_walker->parent;
 
 	for (; client_layer >= 0; client_layer--) {
-		if (masks->access[client_layer] & access &&
+		if (remaining[client_layer] & access &&
 		    client_walker == server_walker)
-			masks->access[client_layer] &= ~access;
+			remaining[client_layer] &= ~access;
 
 		client_walker = client_walker->parent;
 		server_walker = server_walker->parent;
@@ -1750,8 +1750,10 @@ static int hook_unix_find(const struct path *const path, struct sock *other,
 {
 	const struct landlock_ruleset *dom_other;
 	const struct landlock_cred_security *subject;
-	struct layer_access_masks layer_masks;
-	struct landlock_request request = {};
+	access_mask_t remaining[LANDLOCK_MAX_NUM_LAYERS] = {};
+	access_mask_t unfulfilled;
+	size_t denying_layer;
+	u16 i;
 	static const struct access_masks fs_resolve_unix = {
 		.fs = LANDLOCK_ACCESS_FS_RESOLVE_UNIX,
 	};
@@ -1767,11 +1769,13 @@ static int hook_unix_find(const struct path *const path, struct sock *other,
 		return 0;
 
 	/*
-	 * Ignoring return value: that the domains apply was already checked in
-	 * landlock_get_applicable_subject() above.
+	 * Seed each layer's unfulfilled bits with the subset of the requested
+	 * accesses that the layer handles (equivalent to the former
+	 * landlock_init_layer_masks() call with LANDLOCK_KEY_INODE).
 	 */
-	landlock_init_layer_masks(subject->domain, fs_resolve_unix.fs,
-				  &layer_masks, LANDLOCK_KEY_INODE);
+	for (i = 0; i < subject->domain->num_layers; i++)
+		remaining[i] = landlock_get_fs_access_mask(subject->domain, i) &
+			       fs_resolve_unix.fs;
 
 	/* Checks the layers in which we are connecting within the same domain. */
 	unix_state_lock(other);
@@ -1788,21 +1792,29 @@ static int hook_unix_find(const struct path *const path, struct sock *other,
 	dom_other = landlock_cred(other->sk_socket->file->f_cred)->domain;
 
 	/* Access to the same (or a lower) domain is always allowed. */
-	unmask_scoped_access(subject->domain, dom_other, &layer_masks,
+	unmask_scoped_access(subject->domain, dom_other, remaining,
 			     fs_resolve_unix.fs);
 	unix_state_unlock(other);
 
 	/* Checks the connections to allow-listed paths. */
-	if (is_access_to_paths_allowed(subject->domain, path,
-				       fs_resolve_unix.fs, &layer_masks,
-				       &request, NULL, 0, NULL, NULL, NULL))
+	if (is_nouser_or_private(path->dentry))
+		return 0;
+	for (i = 0; i < subject->domain->num_layers; i++)
+		remaining[i] = walk_layer(subject->domain, path, i,
+					  remaining[i]);
+
+	if (reduce_to_youngest_denier(remaining, subject->domain->num_layers,
+				      &unfulfilled, &denying_layer))
 		return 0;
 
-	request.layer_plus_one = landlock_get_denied_layer(subject->domain,
-							   &request.access,
-							   &layer_masks) +
-				 1;
-	landlock_log_denial(subject, &request);
+	landlock_log_denial(subject,
+			    &(struct landlock_request){
+				    .type = LANDLOCK_REQUEST_FS_ACCESS,
+				    .audit.type = LSM_AUDIT_DATA_PATH,
+				    .audit.u.path = *path,
+				    .access = unfulfilled,
+				    .layer_plus_one = denying_layer + 1,
+			    });
 	return -EACCES;
 }
 
