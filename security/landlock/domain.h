@@ -20,6 +20,7 @@
 
 #include "access.h"
 #include "audit.h"
+#include "limits.h"
 
 enum landlock_log_status {
 	LANDLOCK_LOG_PENDING = 0,
@@ -122,7 +123,7 @@ struct landlock_hierarchy {
 deny_masks_t
 landlock_get_deny_masks(const access_mask_t all_existing_optional_access,
 			const access_mask_t optional_access,
-			const struct layer_access_masks *const masks);
+			const access_mask_t layer_remaining[LANDLOCK_MAX_NUM_LAYERS]);
 
 int landlock_init_hierarchy_log(struct landlock_hierarchy *const hierarchy);
 

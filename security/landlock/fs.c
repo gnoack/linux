@@ -981,43 +981,55 @@ is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
 }
 
 /**
- * walk_path_simple - Per-layer path walk for a non-refer access check
+ * walk_path_per_layer - Per-layer path walk, storing one remaining mask per layer
  *
  * @domain: Domain to check against.
  * @path: File hierarchy to walk upward.
  * @access_request: Requested access bits.
- * @unfulfilled_out: On denial, set to the deepest denying layer's remaining
- *     bits (intersection of the requested accesses and what that layer
- *     handled but did not grant anywhere along @path).
- * @denying_layer_out: On denial, set to that layer's zero-based index.
+ * @remaining_out: Per-layer unfulfilled bits on return; slots beyond
+ *     @domain->num_layers are zeroed.
  *
- * Return: True if the request is granted (no layer denies any requested
- * bit), false otherwise.  On false, the output parameters carry the
- * information the caller needs to build an audit record.
+ * Each entry of @remaining_out is the intersection of the requested
+ * accesses with what that layer handled but did not grant anywhere along
+ * @path.  A zero entry means the layer granted every requested access.
  */
-static bool walk_path_simple(const struct landlock_ruleset *const domain,
-			     const struct path *const path,
-			     const access_mask_t access_request,
-			     access_mask_t *const unfulfilled_out,
-			     size_t *const denying_layer_out)
+static void walk_path_per_layer(const struct landlock_ruleset *const domain,
+				const struct path *const path,
+				const access_mask_t access_request,
+				access_mask_t remaining_out[LANDLOCK_MAX_NUM_LAYERS])
 {
-	bool any_unfulfilled = false;
-
-	*unfulfilled_out = 0;
-	*denying_layer_out = 0;
+	memset(remaining_out, 0, sizeof(access_mask_t) * LANDLOCK_MAX_NUM_LAYERS);
 
 	if (is_nouser_or_private(path->dentry))
-		return true;
+		return;
 
 	for (u16 i = 0; i < domain->num_layers; i++) {
 		const access_mask_t initial =
 			landlock_get_fs_access_mask(domain, i) & access_request;
-		const access_mask_t remaining =
-			walk_layer(domain, path, i, initial);
 
-		if (remaining) {
-			*unfulfilled_out = remaining;
-			*denying_layer_out = i;
+		remaining_out[i] = walk_layer(domain, path, i, initial);
+	}
+}
+
+/*
+ * Reduce a per-layer remaining array to the deepest denying layer.  Returns
+ * true if every layer was fulfilled (no denial), false otherwise.  On false,
+ * @narrowed_out gets that layer's remaining bits and @layer_out its index.
+ */
+static bool reduce_to_youngest_denier(
+	const access_mask_t remaining[LANDLOCK_MAX_NUM_LAYERS],
+	const u16 num_layers, access_mask_t *const narrowed_out,
+	size_t *const layer_out)
+{
+	bool any_unfulfilled = false;
+
+	*narrowed_out = 0;
+	*layer_out = 0;
+
+	for (u16 i = 0; i < num_layers; i++) {
+		if (remaining[i]) {
+			*narrowed_out = remaining[i];
+			*layer_out = i;
 			any_unfulfilled = true;
 		}
 	}
@@ -1033,14 +1045,16 @@ static int current_check_access_path(const struct path *const path,
 	};
 	const struct landlock_cred_security *const subject =
 		landlock_get_applicable_subject(current_cred(), masks, NULL);
+	access_mask_t remaining[LANDLOCK_MAX_NUM_LAYERS];
 	access_mask_t unfulfilled;
 	size_t denying_layer;
 
 	if (!subject)
 		return 0;
 
-	if (walk_path_simple(subject->domain, path, access_request,
-			     &unfulfilled, &denying_layer))
+	walk_path_per_layer(subject->domain, path, access_request, remaining);
+	if (reduce_to_youngest_denier(remaining, subject->domain->num_layers,
+				      &unfulfilled, &denying_layer))
 		return 0;
 
 	landlock_log_denial(subject,
@@ -1844,12 +1858,13 @@ static bool is_device(const struct file *const file)
 
 static int hook_file_open(struct file *const file)
 {
-	struct layer_access_masks layer_masks = {};
+	access_mask_t remaining[LANDLOCK_MAX_NUM_LAYERS];
 	access_mask_t open_access_request, full_access_request, allowed_access,
 		optional_access;
 	const struct landlock_cred_security *const subject =
 		landlock_get_applicable_subject(file->f_cred, any_fs, NULL);
-	struct landlock_request request = {};
+	access_mask_t unfulfilled;
+	size_t denying_layer;
 
 	if (!subject)
 		return 0;
@@ -1871,46 +1886,48 @@ static int hook_file_open(struct file *const file)
 
 	full_access_request = open_access_request | optional_access;
 
-	if (is_access_to_paths_allowed(
-		    subject->domain, &file->f_path,
-		    landlock_init_layer_masks(subject->domain,
-					      full_access_request, &layer_masks,
-					      LANDLOCK_KEY_INODE),
-		    &layer_masks, &request, NULL, 0, NULL, NULL, NULL)) {
-		allowed_access = full_access_request;
-	} else {
-		/*
-		 * Calculate the actual allowed access rights from layer_masks.
-		 * Remove the access rights from the full access request which
-		 * are still unfulfilled in any of the layers.
-		 */
-		allowed_access = full_access_request;
-		for (size_t i = 0; i < ARRAY_SIZE(layer_masks.access); i++)
-			allowed_access &= ~layer_masks.access[i];
-	}
+	walk_path_per_layer(subject->domain, &file->f_path, full_access_request,
+			    remaining);
 
 	/*
-	 * For operations on already opened files (i.e. ftruncate()), it is the
-	 * access rights at the time of open() which decide whether the
-	 * operation is permitted. Therefore, we record the relevant subset of
-	 * file access rights in the opened struct file.
+	 * Remove bits still unfulfilled in any layer from the granted set.
+	 * allowed_access is then recorded on the opened file for future
+	 * operations (e.g. ftruncate()) that reuse it.
 	 */
+	allowed_access = full_access_request;
+	for (u16 i = 0; i < subject->domain->num_layers; i++)
+		allowed_access &= ~remaining[i];
+
 	landlock_file(file)->allowed_access = allowed_access;
 #ifdef CONFIG_AUDIT
 	landlock_file(file)->deny_masks = landlock_get_deny_masks(
-		_LANDLOCK_ACCESS_FS_OPTIONAL, optional_access, &layer_masks);
+		_LANDLOCK_ACCESS_FS_OPTIONAL, optional_access, remaining);
 #endif /* CONFIG_AUDIT */
 
 	if (access_mask_subset(open_access_request, allowed_access))
 		return 0;
 
-	/* Sets access to reflect the actual request. */
-	request.access = open_access_request;
-	request.layer_plus_one = landlock_get_denied_layer(subject->domain,
-							   &request.access,
-							   &layer_masks) +
-				 1;
-	landlock_log_denial(subject, &request);
+	/*
+	 * Reduce per-layer remaining bits to the deepest denying layer,
+	 * narrowing to what the user actually asked for on open() so the
+	 * audit record does not mention the opportunistic optional_access
+	 * lookup bits (truncate, ioctl_dev).  The subset check above
+	 * guarantees at least one open_access_request bit is still
+	 * unfulfilled somewhere, so this always finds a denying layer.
+	 */
+	for (u16 i = 0; i < subject->domain->num_layers; i++)
+		remaining[i] &= open_access_request;
+	reduce_to_youngest_denier(remaining, subject->domain->num_layers,
+				  &unfulfilled, &denying_layer);
+
+	landlock_log_denial(subject,
+			    &(struct landlock_request){
+				    .type = LANDLOCK_REQUEST_FS_ACCESS,
+				    .audit.type = LSM_AUDIT_DATA_PATH,
+				    .audit.u.path = file->f_path,
+				    .access = unfulfilled,
+				    .layer_plus_one = denying_layer + 1,
+			    });
 	return -EACCES;
 }
 
