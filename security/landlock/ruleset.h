@@ -310,4 +310,27 @@ landlock_init_layer_masks(const struct landlock_ruleset *const domain,
 			  struct layer_access_masks *masks,
 			  const enum landlock_key_type key_type);
 
+/*
+ * Collect the access bits granted to a single layer by @rule.  A rule
+ * stores its layer entries in a sparse array; iterate and merge the bits
+ * of every entry that targets @layer_level (zero-based).
+ */
+static inline access_mask_t
+landlock_rule_layer_access(const struct landlock_rule *const rule,
+			   const u16 layer_level)
+{
+	access_mask_t granted = 0;
+
+	if (!rule)
+		return 0;
+
+	for (size_t i = 0; i < rule->num_layers; i++) {
+		const struct landlock_layer *const layer = &rule->layers[i];
+
+		if (layer->level - 1 == layer_level)
+			granted |= layer->access;
+	}
+	return granted;
+}
+
 #endif /* _SECURITY_LANDLOCK_RULESET_H */

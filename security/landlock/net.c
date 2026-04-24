@@ -47,7 +47,6 @@ static int current_check_access_socket(struct socket *const sock,
 				       access_mask_t access_request)
 {
 	__be16 port;
-	struct layer_access_masks layer_masks = {};
 	const struct landlock_rule *rule;
 	struct landlock_id id = {
 		.type = LANDLOCK_KEY_NET_PORT,
@@ -58,6 +57,10 @@ static int current_check_access_socket(struct socket *const sock,
 	const struct landlock_cred_security *const subject =
 		landlock_get_applicable_subject(current_cred(), masks, NULL);
 	struct lsm_network_audit audit_net = {};
+	access_mask_t youngest_remaining = 0;
+	size_t youngest_denying_layer = 0;
+	bool any_unfulfilled = false;
+	u16 i;
 
 	if (!subject)
 		return 0;
@@ -188,29 +191,41 @@ static int current_check_access_socket(struct socket *const sock,
 	BUILD_BUG_ON(sizeof(port) > sizeof(id.key.data));
 
 	rule = landlock_find_rule(subject->domain, id);
-	access_request = landlock_init_layer_masks(subject->domain,
-						   access_request, &layer_masks,
-						   LANDLOCK_KEY_NET_PORT);
-	if (!access_request)
-		return 0;
 
-	if (landlock_unmask_layers(rule, &layer_masks))
+	/*
+	 * Walk the domain layer-by-layer.  For each layer, check which of
+	 * the requested bits it handles and which of those are not covered
+	 * by @rule's per-layer allow bits.  We keep overwriting
+	 * youngest_remaining as we iterate shallow-to-deep so the final
+	 * value is the deepest denying layer's unfulfilled bits, matching
+	 * landlock_get_denied_layer()'s narrowing semantics for audit.
+	 */
+	for (i = 0; i < subject->domain->num_layers; i++) {
+		const access_mask_t handled =
+			landlock_get_net_access_mask(subject->domain, i) &
+			access_request;
+		const access_mask_t remaining =
+			handled & ~landlock_rule_layer_access(rule, i);
+
+		if (remaining) {
+			youngest_remaining = remaining;
+			youngest_denying_layer = i;
+			any_unfulfilled = true;
+		}
+	}
+
+	if (!any_unfulfilled)
 		return 0;
 
 	audit_net.family = address->sa_family;
-	{
-		size_t denying_layer = landlock_get_denied_layer(
-			subject->domain, &access_request, &layer_masks);
-
-		landlock_log_denial(subject,
-				    &(struct landlock_request){
-					    .type = LANDLOCK_REQUEST_NET_ACCESS,
-					    .audit.type = LSM_AUDIT_DATA_NET,
-					    .audit.u.net = &audit_net,
-					    .access = access_request,
-					    .layer_plus_one = denying_layer + 1,
-				    });
-	}
+	landlock_log_denial(subject,
+			    &(struct landlock_request){
+				    .type = LANDLOCK_REQUEST_NET_ACCESS,
+				    .audit.type = LSM_AUDIT_DATA_NET,
+				    .audit.u.net = &audit_net,
+				    .access = youngest_remaining,
+				    .layer_plus_one = youngest_denying_layer + 1,
+			    });
 	return -EACCES;
 }
 
