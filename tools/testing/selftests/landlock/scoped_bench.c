@@ -83,7 +83,8 @@ static void run_scenario(size_t num_iterations, size_t num_layers,
 
 	target = getppid();
 	if (target <= 1)
-		errx(1, "parent PID is %d, cannot benchmark scope check", target);
+		errx(1, "parent PID is %d, cannot benchmark scope check",
+		     target);
 
 	printf("*** Benchmark ***\n");
 	printf("%zu iterations, ", num_iterations);

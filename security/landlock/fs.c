@@ -402,6 +402,97 @@ static const struct access_masks any_fs = {
 };
 
 /*
+ * Collect the access bits granted to a single layer by @rule.  A rule
+ * stores its layer entries in a sparse array, so iterate and merge the bits
+ * of every entry that targets @layer_level (zero-based).
+ */
+static access_mask_t rule_layer_access(const struct landlock_rule *const rule,
+				       const u16 layer_level)
+{
+	access_mask_t granted = 0;
+
+	if (!rule)
+		return 0;
+
+	for (size_t i = 0; i < rule->num_layers; i++) {
+		const struct landlock_layer *const layer = &rule->layers[i];
+
+		if (layer->level - 1 == layer_level)
+			granted |= layer->access;
+	}
+	return granted;
+}
+
+/**
+ * walk_layer - Walk a file hierarchy upward for one Landlock layer
+ *
+ * @domain: Domain to check against.
+ * @path: File hierarchy to walk through.  Walked upward to the real root
+ *     (through mount points) or until @remaining reaches 0.
+ * @layer_level: Zero-based index of the layer being walked.
+ * @remaining: Unfulfilled access rights for this layer at the start of the
+ *     walk.
+ *
+ * Return: The access rights that are still unfulfilled once the walk ends.
+ * A return value of 0 means this layer grants every requested access along
+ * the @path hierarchy.
+ */
+static access_mask_t walk_layer(const struct landlock_ruleset *const domain,
+				const struct path *const path,
+				const u16 layer_level, access_mask_t remaining)
+{
+	struct path walker;
+
+	if (!remaining)
+		return 0;
+
+	walker = *path;
+	path_get(&walker);
+
+	while (true) {
+		remaining &= ~rule_layer_access(
+			find_rule(domain, walker.dentry), layer_level);
+		if (!remaining)
+			break;
+
+		/* Hop across mount points until a non-root dentry is found. */
+		while (walker.dentry == walker.mnt->mnt_root) {
+			if (!follow_up(&walker))
+				goto out; /* real root: stop */
+		}
+
+		if (unlikely(IS_ROOT(walker.dentry))) {
+			if (likely(walker.mnt->mnt_flags & MNT_INTERNAL)) {
+				/*
+				 * Internal filesystem disconnected root (e.g.
+				 * nsfs reached via /proc/<pid>/ns/<ns>):
+				 * treat as fully allowed.
+				 */
+				remaining = 0;
+				break;
+			}
+
+			/*
+			 * Disconnected root from a bind mount: resume from
+			 * the mount root.
+			 */
+			dput(walker.dentry);
+			walker.dentry = walker.mnt->mnt_root;
+			dget(walker.dentry);
+		} else {
+			struct dentry *const parent =
+				dget_parent(walker.dentry);
+
+			dput(walker.dentry);
+			walker.dentry = parent;
+		}
+	}
+out:
+	path_put(&walker);
+	return remaining;
+}
+
+/*
  * Returns true iff the child file with the given src_child access rights under
  * src_parent would result in having the same or fewer access rights if it were
  * moved under new_parent.
@@ -751,9 +842,9 @@ is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
 			   struct landlock_request *const log_request_parent2,
 			   struct dentry *const dentry_child2)
 {
-	bool allowed_parent1 = false, allowed_parent2 = false, is_dom_check,
-	     child1_is_directory = true, child2_is_directory = true;
-	struct path walker_path;
+	bool allowed_parent1, allowed_parent2;
+	bool child1_is_directory = true, child2_is_directory = true;
+	bool is_dom_check;
 	access_mask_t access_masked_parent1, access_masked_parent2;
 	struct layer_access_masks _layer_masks_child1, _layer_masks_child2;
 	struct layer_access_masks *layer_masks_child1 = NULL,
@@ -771,13 +862,9 @@ is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
 	if (WARN_ON_ONCE(!layer_masks_parent1))
 		return false;
 
-	allowed_parent1 = is_layer_masks_allowed(layer_masks_parent1);
-
 	if (unlikely(layer_masks_parent2)) {
 		if (WARN_ON_ONCE(!dentry_child1))
 			return false;
-
-		allowed_parent2 = is_layer_masks_allowed(layer_masks_parent2);
 
 		/*
 		 * For a double request, first check for potential privilege
@@ -815,109 +902,52 @@ is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
 		child2_is_directory = d_is_dir(dentry_child2);
 	}
 
-	walker_path = *path;
-	path_get(&walker_path);
 	/*
-	 * We need to walk through all the hierarchy to not miss any relevant
-	 * restriction.
+	 * Walk the path once per layer, each walk tracking a single access
+	 * mask.  The earlier implementation walked the path a single time
+	 * while maintaining a per-layer matrix in parallel; because every
+	 * rule acts layer-by-layer anyway, computing one layer at a time
+	 * makes each walk self-contained and lets it exit as soon as the
+	 * layer has been granted every requested access.
 	 */
-	while (true) {
-		const struct landlock_rule *rule;
-
-		/*
-		 * If at least all accesses allowed on the destination are
-		 * already allowed on the source, respectively if there is at
-		 * least as much as restrictions on the destination than on the
-		 * source, then we can safely refer files from the source to
-		 * the destination without risking a privilege escalation.
-		 * This also applies in the case of RENAME_EXCHANGE, which
-		 * implies checks on both direction.  This is crucial for
-		 * standalone multilayered security policies.  Furthermore,
-		 * this helps avoid policy writers to shoot themselves in the
-		 * foot.
-		 */
-		if (unlikely(is_dom_check &&
-			     no_more_access(
-				     layer_masks_parent1, layer_masks_child1,
-				     child1_is_directory, layer_masks_parent2,
-				     layer_masks_child2,
-				     child2_is_directory))) {
-			/*
-			 * Now, downgrades the remaining checks from domain
-			 * handled accesses to requested accesses.
-			 */
-			is_dom_check = false;
-			access_masked_parent1 = access_request_parent1;
-			access_masked_parent2 = access_request_parent2;
-
-			allowed_parent1 =
-				allowed_parent1 ||
-				scope_to_request(access_masked_parent1,
-						 layer_masks_parent1);
-			allowed_parent2 =
-				allowed_parent2 ||
-				scope_to_request(access_masked_parent2,
-						 layer_masks_parent2);
-
-			/* Stops when all accesses are granted. */
-			if (allowed_parent1 && allowed_parent2)
-				break;
-		}
-
-		rule = find_rule(domain, walker_path.dentry);
-		allowed_parent1 =
-			allowed_parent1 ||
-			landlock_unmask_layers(rule, layer_masks_parent1);
-		allowed_parent2 =
-			allowed_parent2 ||
-			landlock_unmask_layers(rule, layer_masks_parent2);
-
-		/* Stops when a rule from each layer grants access. */
-		if (allowed_parent1 && allowed_parent2)
-			break;
-
-jump_up:
-		if (walker_path.dentry == walker_path.mnt->mnt_root) {
-			if (follow_up(&walker_path)) {
-				/* Ignores hidden mount points. */
-				goto jump_up;
-			} else {
-				/*
-				 * Stops at the real root.  Denies access
-				 * because not all layers have granted access.
-				 */
-				break;
-			}
-		}
-
-		if (unlikely(IS_ROOT(walker_path.dentry))) {
-			if (likely(walker_path.mnt->mnt_flags & MNT_INTERNAL)) {
-				/*
-				 * Stops and allows access when reaching disconnected root
-				 * directories that are part of internal filesystems (e.g. nsfs,
-				 * which is reachable through /proc/<pid>/ns/<namespace>).
-				 */
-				allowed_parent1 = true;
-				allowed_parent2 = true;
-				break;
-			}
-
-			/*
-			 * We reached a disconnected root directory from a bind mount.
-			 * Let's continue the walk with the mount point we missed.
-			 */
-			dput(walker_path.dentry);
-			walker_path.dentry = walker_path.mnt->mnt_root;
-			dget(walker_path.dentry);
-		} else {
-			struct dentry *const parent_dentry =
-				dget_parent(walker_path.dentry);
-
-			dput(walker_path.dentry);
-			walker_path.dentry = parent_dentry;
-		}
+	for (u16 i = 0; i < domain->num_layers; i++) {
+		layer_masks_parent1->access[i] = walk_layer(
+			domain, path, i, layer_masks_parent1->access[i]);
+		if (layer_masks_parent2)
+			layer_masks_parent2->access[i] =
+				walk_layer(domain, path, i,
+					   layer_masks_parent2->access[i]);
 	}
-	path_put(&walker_path);
+
+	/*
+	 * For a refer check the walk was done against the full set of domain
+	 * handled accesses.  If the remaining per-layer restrictions on the
+	 * destination are a subset of those on the source, there is no
+	 * privilege escalation risk and we can downgrade to the actually
+	 * requested accesses.  Otherwise the access is only granted when the
+	 * wider per-layer mask has been fully fulfilled.
+	 *
+	 * Evaluating no_more_access() once at the end is equivalent to the
+	 * earlier mid-walk check because both no_more_access() and
+	 * is_layer_masks_allowed() are monotonic: rules only clear bits from
+	 * the matrices, which can only make the subset relation become true
+	 * and matrices become fully zero.
+	 */
+	if (is_dom_check &&
+	    no_more_access(layer_masks_parent1, layer_masks_child1,
+			   child1_is_directory, layer_masks_parent2,
+			   layer_masks_child2, child2_is_directory)) {
+		access_masked_parent1 = access_request_parent1;
+		access_masked_parent2 = access_request_parent2;
+		allowed_parent1 = scope_to_request(access_masked_parent1,
+						   layer_masks_parent1);
+		allowed_parent2 = scope_to_request(access_masked_parent2,
+						   layer_masks_parent2);
+	} else {
+		allowed_parent1 = is_layer_masks_allowed(layer_masks_parent1);
+		allowed_parent2 = !layer_masks_parent2 ||
+				  is_layer_masks_allowed(layer_masks_parent2);
+	}
 
 	/*
 	 * Check CONFIG_AUDIT to enable elision of log_request_parent* and
@@ -1031,8 +1061,6 @@ static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
 				    struct dentry *dir,
 				    struct layer_access_masks *layer_masks_dom)
 {
-	bool ret = false;
-
 	if (WARN_ON_ONCE(!domain || !mnt_root || !dir || !layer_masks_dom))
 		return true;
 	if (is_nouser_or_private(dir))
@@ -1042,34 +1070,38 @@ static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
 				       layer_masks_dom, LANDLOCK_KEY_INODE))
 		return true;
 
-	dget(dir);
-	while (true) {
-		struct dentry *parent_dentry;
+	/*
+	 * Walk once per layer, clearing bits from each layer's unfulfilled
+	 * access mask independently, up to the mount root (or the filesystem
+	 * root for a disconnected directory).
+	 */
+	for (u16 i = 0; i < domain->num_layers; i++) {
+		access_mask_t remaining = layer_masks_dom->access[i];
+		struct dentry *walker;
 
-		/* Gets all layers allowing all domain accesses. */
-		if (landlock_unmask_layers(find_rule(domain, dir),
-					   layer_masks_dom)) {
-			/*
-			 * Stops when all handled accesses are allowed by at
-			 * least one rule in each layer.
-			 */
-			ret = true;
-			break;
+		if (!remaining)
+			continue;
+
+		walker = dget(dir);
+		while (true) {
+			struct dentry *parent;
+
+			remaining &= ~rule_layer_access(
+				find_rule(domain, walker), i);
+			if (!remaining)
+				break;
+			if (walker == mnt_root || unlikely(IS_ROOT(walker)))
+				break;
+
+			parent = dget_parent(walker);
+			dput(walker);
+			walker = parent;
 		}
-
-		/*
-		 * Stops at the mount point or the filesystem root for a disconnected
-		 * directory.
-		 */
-		if (dir == mnt_root || unlikely(IS_ROOT(dir)))
-			break;
-
-		parent_dentry = dget_parent(dir);
-		dput(dir);
-		dir = parent_dentry;
+		dput(walker);
+		layer_masks_dom->access[i] = remaining;
 	}
-	dput(dir);
-	return ret;
+
+	return is_layer_masks_allowed(layer_masks_dom);
 }
 
 /**

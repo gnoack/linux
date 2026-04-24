@@ -220,8 +220,8 @@ static void run_scenario(size_t num_subdirs, size_t num_iterations,
 	int curr = build_directory(num_subdirs, num_layers, use_landlock);
 
 	for (size_t i = 0; i < num_iterations; i++) {
-		int fd = openat(curr, "file.txt",
-				O_CREAT | O_TRUNC | O_WRONLY, 0600);
+		int fd = openat(curr, "file.txt", O_CREAT | O_TRUNC | O_WRONLY,
+				0600);
 		if (use_landlock) {
 			if (fd >= 0)
 				errx(1, "openat succeeded, expected EACCES");
