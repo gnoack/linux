@@ -25,6 +25,7 @@
 #include <sys/socket.h>
 #include <sys/times.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -39,9 +40,11 @@ static void usage(const char *const argv0)
 	printf("\n");
 	printf("Options:\n");
 	printf("  -h	help\n");
-	printf("  -L	disable Landlock (as a baseline)\n");
-	printf("  -l L	set number of stacked Landlock domains to L\n");
+	printf("  -L	run a no-Landlock baseline scenario\n");
+	printf("  -l L	run one scenario per entry in comma-separated layer list L\n");
 	printf("  -n N	set number of benchmark iterations to N\n");
+	printf("\n");
+	printf("  Without -L or -l, the default sweep runs a baseline plus 1, 2, 4, 8 layers.\n");
 }
 
 static void enforce_net_domain(void)
@@ -62,42 +65,28 @@ static void enforce_net_domain(void)
 	close(ruleset_fd);
 }
 
-int main(int argc, char *argv[])
+static void run_scenario(size_t num_iterations, size_t num_layers,
+			 const bool use_landlock)
 {
-	bool use_landlock = true;
-	size_t num_iterations = 100000;
-	size_t num_layers = 1;
-	int c, abi;
-	struct tms start_time, end_time;
 	struct sockaddr_in addr = {
 		.sin_family = AF_INET,
 		.sin_port = htons(1),
 		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
 	};
+	struct tms start_time, end_time;
+	pid_t pid;
+	int status, abi;
 
-	setbuf(stdout, NULL);
-	while ((c = getopt(argc, argv, "hLl:n:")) != -1) {
-		switch (c) {
-		case 'h':
-			usage(argv[0]);
-			return EXIT_SUCCESS;
-		case 'L':
-			use_landlock = false;
-			break;
-		case 'l':
-			num_layers = atoi(optarg);
-			break;
-		case 'n':
-			num_iterations = atoi(optarg);
-			break;
-		default:
-			usage(argv[0]);
-			return EXIT_FAILURE;
-		}
+	pid = fork();
+	if (pid < 0)
+		err(1, "fork");
+	if (pid > 0) {
+		if (waitpid(pid, &status, 0) < 0)
+			err(1, "waitpid");
+		if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+			errx(1, "scenario failed");
+		return;
 	}
-
-	if (use_landlock && num_layers < 1)
-		errx(1, "-l must be at least 1 when Landlock is enabled");
 
 	printf("*** Benchmark ***\n");
 	printf("%zu iterations, ", num_iterations);
@@ -149,5 +138,61 @@ int main(int argc, char *argv[])
 	       end_time.tms_utime - start_time.tms_utime);
 	printf("Clocks per second: %ld\n", CLOCKS_PER_SEC);
 
-	return 0;
+	_exit(EXIT_SUCCESS);
+}
+
+int main(int argc, char *argv[])
+{
+	size_t num_iterations = 100000;
+	const char *layers_arg = NULL;
+	bool baseline = false;
+	int c;
+
+	setbuf(stdout, NULL);
+	while ((c = getopt(argc, argv, "hLl:n:")) != -1) {
+		switch (c) {
+		case 'h':
+			usage(argv[0]);
+			return EXIT_SUCCESS;
+		case 'L':
+			baseline = true;
+			break;
+		case 'l':
+			layers_arg = optarg;
+			break;
+		case 'n':
+			num_iterations = atoi(optarg);
+			break;
+		default:
+			usage(argv[0]);
+			return EXIT_FAILURE;
+		}
+	}
+
+	if (!layers_arg && !baseline) {
+		baseline = true;
+		layers_arg = "1,2,4,8";
+	}
+
+	if (baseline)
+		run_scenario(num_iterations, 0, false);
+
+	if (layers_arg) {
+		char *buf = strdup(layers_arg);
+		char *save = NULL, *tok;
+
+		if (!buf)
+			err(1, "strdup");
+		for (tok = strtok_r(buf, ",", &save); tok;
+		     tok = strtok_r(NULL, ",", &save)) {
+			size_t layers = atoi(tok);
+
+			if (layers < 1)
+				errx(1, "-l entries must be >= 1");
+			run_scenario(num_iterations, layers, true);
+		}
+		free(buf);
+	}
+
+	return EXIT_SUCCESS;
 }

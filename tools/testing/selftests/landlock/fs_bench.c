@@ -35,6 +35,7 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/times.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -51,10 +52,12 @@ static void usage(const char *const argv0)
 	printf("\n");
 	printf("Options:\n");
 	printf("  -h	help\n");
-	printf("  -L	disable Landlock (as a baseline)\n");
+	printf("  -L	run a no-Landlock baseline scenario\n");
 	printf("  -d D	set directory depth to D\n");
-	printf("  -l L	set number of stacked Landlock domains to L\n");
+	printf("  -l L	run one scenario per entry in comma-separated layer list L\n");
 	printf("  -n N	set number of benchmark iterations to N\n");
+	printf("\n");
+	printf("  Without -L or -l, the default sweep runs a baseline plus 1, 2, 4, 8 layers.\n");
 }
 
 /* Create a chain of depth nested directories and return the FD to the deepest. */
@@ -173,68 +176,36 @@ static int build_directory(size_t depth, size_t num_layers,
 	return open_deepest(depth);
 }
 
-static void remove_recursively(const size_t depth)
+/*
+ * Run one benchmark scenario in a child process: build the directory tree,
+ * enforce num_layers Landlock domains (unless use_landlock is false), and
+ * exercise the access check num_iterations times.  The child exits on
+ * completion, leaving the parent's state untouched so the next scenario
+ * starts clean.
+ */
+static void run_scenario(size_t num_subdirs, size_t num_iterations,
+			 size_t num_layers, const bool use_landlock)
 {
-	int fd = openat(AT_FDCWD, ".", O_PATH);
-
-	if (fd < 0)
-		err(1, "openat(.)");
-
-	for (size_t i = 0; i < depth - 1; i++) {
-		int oldfd = fd;
-
-		fd = openat(fd, PATH, O_PATH);
-		if (fd < 0)
-			err(1, "openat(%s)", PATH);
-		close(oldfd);
-	}
-
-	for (size_t i = 0; i < depth; i++) {
-		if (unlinkat(fd, PATH, AT_REMOVEDIR) < 0)
-			err(1, "unlinkat(%s)", PATH);
-		int newfd = openat(fd, "..", O_PATH);
-
-		close(fd);
-		fd = newfd;
-	}
-	close(fd);
-}
-
-int main(int argc, char *argv[])
-{
-	bool use_landlock = true;
-	size_t num_iterations = 100000;
-	size_t num_subdirs = 10000;
-	size_t num_layers = 1;
-	int c, curr, fd;
+	char tmpl[] = "/tmp/fs_bench.XXXXXX";
 	struct tms start_time, end_time;
+	pid_t pid;
+	int status;
 
-	setbuf(stdout, NULL);
-	while ((c = getopt(argc, argv, "hLd:l:n:")) != -1) {
-		switch (c) {
-		case 'h':
-			usage(argv[0]);
-			return EXIT_SUCCESS;
-		case 'L':
-			use_landlock = false;
-			break;
-		case 'd':
-			num_subdirs = atoi(optarg);
-			break;
-		case 'l':
-			num_layers = atoi(optarg);
-			break;
-		case 'n':
-			num_iterations = atoi(optarg);
-			break;
-		default:
-			usage(argv[0]);
-			return EXIT_FAILURE;
-		}
+	pid = fork();
+	if (pid < 0)
+		err(1, "fork");
+	if (pid > 0) {
+		if (waitpid(pid, &status, 0) < 0)
+			err(1, "waitpid");
+		if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+			errx(1, "scenario failed");
+		return;
 	}
 
-	if (use_landlock && num_layers < 1)
-		errx(1, "-l must be at least 1 when Landlock is enabled");
+	if (!mkdtemp(tmpl))
+		err(1, "mkdtemp");
+	if (chdir(tmpl) < 0)
+		err(1, "chdir(%s)", tmpl);
 
 	printf("*** Benchmark ***\n");
 	printf("%zu dirs, %zu iterations, ", num_subdirs, num_iterations);
@@ -246,13 +217,13 @@ int main(int argc, char *argv[])
 	if (times(&start_time) == -1)
 		err(1, "times");
 
-	curr = build_directory(num_subdirs, num_layers, use_landlock);
+	int curr = build_directory(num_subdirs, num_layers, use_landlock);
 
-	for (int i = 0; i < num_iterations; i++) {
-		fd = openat(curr, "file.txt", O_CREAT | O_TRUNC | O_WRONLY,
-			    0600);
+	for (size_t i = 0; i < num_iterations; i++) {
+		int fd = openat(curr, "file.txt",
+				O_CREAT | O_TRUNC | O_WRONLY, 0600);
 		if (use_landlock) {
-			if (fd == 0)
+			if (fd >= 0)
 				errx(1, "openat succeeded, expected EACCES");
 			if (errno != EACCES)
 				err(1, "openat expected EACCES, but got");
@@ -272,6 +243,65 @@ int main(int argc, char *argv[])
 	printf("Clocks per second: %ld\n", CLOCKS_PER_SEC);
 
 	close(curr);
+	_exit(EXIT_SUCCESS);
+}
 
-	remove_recursively(num_subdirs);
+int main(int argc, char *argv[])
+{
+	size_t num_iterations = 100000;
+	size_t num_subdirs = 10000;
+	const char *layers_arg = NULL;
+	bool baseline = false;
+	int c;
+
+	setbuf(stdout, NULL);
+	while ((c = getopt(argc, argv, "hLd:l:n:")) != -1) {
+		switch (c) {
+		case 'h':
+			usage(argv[0]);
+			return EXIT_SUCCESS;
+		case 'L':
+			baseline = true;
+			break;
+		case 'd':
+			num_subdirs = atoi(optarg);
+			break;
+		case 'l':
+			layers_arg = optarg;
+			break;
+		case 'n':
+			num_iterations = atoi(optarg);
+			break;
+		default:
+			usage(argv[0]);
+			return EXIT_FAILURE;
+		}
+	}
+
+	if (!layers_arg && !baseline) {
+		baseline = true;
+		layers_arg = "1,2,4,8";
+	}
+
+	if (baseline)
+		run_scenario(num_subdirs, num_iterations, 0, false);
+
+	if (layers_arg) {
+		char *buf = strdup(layers_arg);
+		char *save = NULL, *tok;
+
+		if (!buf)
+			err(1, "strdup");
+		for (tok = strtok_r(buf, ",", &save); tok;
+		     tok = strtok_r(NULL, ",", &save)) {
+			size_t layers = atoi(tok);
+
+			if (layers < 1)
+				errx(1, "-l entries must be >= 1");
+			run_scenario(num_subdirs, num_iterations, layers, true);
+		}
+		free(buf);
+	}
+
+	return EXIT_SUCCESS;
 }
