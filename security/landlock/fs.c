@@ -449,28 +449,43 @@ init_fs_layer_masks(const struct landlock_ruleset *const domain,
 }
 
 /*
- * Clear bits from each layer of @masks that @rule grants at that layer.
- * Returns true when every layer is fully fulfilled.  Functionally
- * equivalent to the former landlock_unmask_layers().
+ * Collect the access bits granted to a single layer by @rule.  A rule
+ * stores its layer entries in a sparse array, so iterate and merge the bits
+ * of every entry that targets @layer_level (zero-based).
  */
-static bool unmask_layers(const struct landlock_rule *const rule,
-			  struct layer_access_masks *const masks)
+static access_mask_t rule_layer_access(const struct landlock_rule *const rule,
+				       const u16 layer_level)
 {
-	if (!masks)
-		return true;
+	access_mask_t granted = 0;
+
 	if (!rule)
-		return false;
+		return 0;
 
 	for (size_t i = 0; i < rule->num_layers; i++) {
 		const struct landlock_layer *const layer = &rule->layers[i];
 
-		masks->access[layer->level - 1] &= ~layer->access;
+		if (layer->level - 1 == layer_level)
+			granted |= layer->access;
 	}
+	return granted;
+}
 
-	for (size_t i = 0; i < ARRAY_SIZE(masks->access); i++)
-		if (masks->access[i])
-			return false;
-	return true;
+/*
+ * Initialise @masks for a refer-path child dentry.  For each layer, the
+ * unfulfilled set is the layer's handled FS bits minus whatever bits @dentry
+ * already grants at that layer.
+ */
+static void init_child_layer_masks(const struct landlock_ruleset *const domain,
+				   struct dentry *const dentry,
+				   struct layer_access_masks *const masks)
+{
+	const struct landlock_rule *const rule = find_rule(domain, dentry);
+
+	for (size_t i = 0; i < domain->num_layers; i++)
+		masks->access[i] = landlock_get_fs_access_mask(domain, i) &
+				   ~rule_layer_access(rule, i);
+	for (size_t i = domain->num_layers; i < ARRAY_SIZE(masks->access); i++)
+		masks->access[i] = 0;
 }
 
 /*
@@ -540,28 +555,6 @@ static void test_get_denied_layer(struct kunit *const test)
 }
 
 #endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
-
-/*
- * Collect the access bits granted to a single layer by @rule.  A rule
- * stores its layer entries in a sparse array, so iterate and merge the bits
- * of every entry that targets @layer_level (zero-based).
- */
-static access_mask_t rule_layer_access(const struct landlock_rule *const rule,
-				       const u16 layer_level)
-{
-	access_mask_t granted = 0;
-
-	if (!rule)
-		return 0;
-
-	for (size_t i = 0; i < rule->num_layers; i++) {
-		const struct landlock_layer *const layer = &rule->layers[i];
-
-		if (layer->level - 1 == layer_level)
-			granted |= layer->access;
-	}
-	return granted;
-}
 
 /**
  * walk_layer - Walk a file hierarchy upward for one Landlock layer
@@ -1024,18 +1017,14 @@ is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
 	}
 
 	if (unlikely(dentry_child1)) {
-		if (init_fs_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
-					&_layer_masks_child1))
-			unmask_layers(find_rule(domain, dentry_child1),
-				      &_layer_masks_child1);
+		init_child_layer_masks(domain, dentry_child1,
+				       &_layer_masks_child1);
 		layer_masks_child1 = &_layer_masks_child1;
 		child1_is_directory = d_is_dir(dentry_child1);
 	}
 	if (unlikely(dentry_child2)) {
-		if (init_fs_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
-					&_layer_masks_child2))
-			unmask_layers(find_rule(domain, dentry_child2),
-				      &_layer_masks_child2);
+		init_child_layer_masks(domain, dentry_child2,
+				       &_layer_masks_child2);
 		layer_masks_child2 = &_layer_masks_child2;
 		child2_is_directory = d_is_dir(dentry_child2);
 	}
