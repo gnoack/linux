@@ -62,14 +62,12 @@ static_assert(sizeof(typeof_member(union access_masks_all, masks)) ==
 	      sizeof(typeof_member(union access_masks_all, all)));
 
 /*
- * Tracks domains responsible of a denied access.  This avoids storing in each
- * object the full matrix of per-layer unfulfilled access rights, which is
- * required by update_request().
- *
- * Each nibble represents the layer index of the newest layer which denied a
- * certain access right.  For file system access rights, the upper four bits are
- * the index of the layer which denies LANDLOCK_ACCESS_FS_IOCTL_DEV and the
- * lower nibble represents LANDLOCK_ACCESS_FS_TRUNCATE.
+ * Tracks the domain layer responsible for denying a given optional access
+ * right.  Each nibble holds a zero-based layer index for one bit of
+ * @_LANDLOCK_ACCESS_FS_OPTIONAL: for file system access rights, the upper
+ * nibble is the denying layer for LANDLOCK_ACCESS_FS_IOCTL_DEV and the
+ * lower nibble for LANDLOCK_ACCESS_FS_TRUNCATE.  Encoded by
+ * landlock_get_deny_masks(), decoded by landlock_get_layer_from_deny_mask().
  */
 typedef u8 deny_masks_t;
 

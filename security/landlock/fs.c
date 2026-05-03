@@ -1359,8 +1359,7 @@ static int hook_unix_find(const struct path *const path, struct sock *other,
 
 	/*
 	 * Seed each layer's unfulfilled bits with the subset of the requested
-	 * accesses that the layer handles (equivalent to the former
-	 * landlock_init_layer_masks() call with LANDLOCK_KEY_INODE).
+	 * accesses that the layer handles.
 	 */
 	for (i = 0; i < subject->domain->num_layers; i++)
 		remaining[i] = landlock_get_fs_access_mask(subject->domain, i) &

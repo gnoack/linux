@@ -195,10 +195,9 @@ static int current_check_access_socket(struct socket *const sock,
 	/*
 	 * Walk the domain layer-by-layer.  For each layer, check which of
 	 * the requested bits it handles and which of those are not covered
-	 * by @rule's per-layer allow bits.  We keep overwriting
-	 * youngest_remaining as we iterate shallow-to-deep so the final
-	 * value is the deepest denying layer's unfulfilled bits, matching
-	 * landlock_get_denied_layer()'s narrowing semantics for audit.
+	 * by @rule's per-layer allow bits.  Overwrite youngest_remaining as
+	 * we iterate shallow-to-deep so the final value is the deepest
+	 * denying layer's unfulfilled bits, which is what audit reports.
 	 */
 	for (i = 0; i < subject->domain->num_layers; i++) {
 		const access_mask_t handled =
