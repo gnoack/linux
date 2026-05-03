@@ -790,37 +790,17 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 		access_request_parent2 |= maybe_remove(new_dentry);
 	}
 
-	/* The mount points are the same for old and new paths, cf. EXDEV. */
-	if (old_dentry->d_parent == new_dir->dentry) {
-		/*
-		 * The LANDLOCK_ACCESS_FS_REFER access right is not required
-		 * for same-directory referer (i.e. no reparenting): both ends
-		 * sit under the same parent so there is no privilege
-		 * escalation risk.  This collapses to the regular per-layer
-		 * path walk against the union of both parents' requests.
-		 */
-		access_mask_t remaining[LANDLOCK_MAX_NUM_LAYERS];
-		access_mask_t unfulfilled;
-		size_t denying_layer;
+	/*
+	 * Same-directory referer (i.e. no reparenting): no privilege
+	 * escalation risk and LANDLOCK_ACCESS_FS_REFER is not required, so
+	 * this collapses to the regular path access check against the union
+	 * of both parents' requests.  Mount points are equal, cf. EXDEV.
+	 */
+	if (old_dentry->d_parent == new_dir->dentry)
+		return current_check_access_path(new_dir,
+						 access_request_parent1 |
+							 access_request_parent2);
 
-		walk_path_per_layer(domain, new_dir,
-				    access_request_parent1 |
-					    access_request_parent2,
-				    remaining);
-		if (reduce_to_youngest_denier(remaining, domain->num_layers,
-					      &unfulfilled, &denying_layer))
-			return 0;
-
-		landlock_log_denial(subject,
-				    &(struct landlock_request){
-					    .type = LANDLOCK_REQUEST_FS_ACCESS,
-					    .audit.type = LSM_AUDIT_DATA_PATH,
-					    .audit.u.path = *new_dir,
-					    .access = unfulfilled,
-					    .layer_plus_one = denying_layer + 1,
-				    });
-		return -EACCES;
-	}
 
 	access_request_parent1 |= LANDLOCK_ACCESS_FS_REFER;
 	access_request_parent2 |= LANDLOCK_ACCESS_FS_REFER;
