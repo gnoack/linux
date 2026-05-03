@@ -401,55 +401,6 @@ static const struct access_masks any_fs = {
 	.fs = ~0,
 };
 
-/**
- * struct layer_access_masks - Per-layer matrix of unfulfilled access rights
- *
- * Tracks, for every Landlock layer of a domain, which bits of an access
- * request are still unsatisfied.  All bits zero means the request is fully
- * granted.
- *
- * This type is private to the filesystem refer path (link / rename), which
- * is the only Landlock check that needs cross-layer bookkeeping (cf.
- * no_more_access()).  All other fs checks work with plain access_mask_t
- * scalars or arrays.  Do not export this struct outside of fs.c, and do not
- * grow new callers in non-refer code paths.
- */
-struct layer_access_masks {
-	access_mask_t access[LANDLOCK_MAX_NUM_LAYERS];
-};
-
-/*
- * Populate @masks such that each layer handling any of the requested bits
- * gets those bits set.  Returns the union of bits that are handled by at
- * least one layer.  Functionally equivalent to the former
- * landlock_init_layer_masks() for LANDLOCK_KEY_INODE.
- */
-static access_mask_t
-init_fs_layer_masks(const struct landlock_ruleset *const domain,
-		    const access_mask_t access_request,
-		    struct layer_access_masks *const masks)
-{
-	access_mask_t handled_accesses = 0;
-
-	/* An empty access request can happen because of O_WRONLY | O_RDWR. */
-	if (!access_request) {
-		memset(masks, 0, sizeof(*masks));
-		return 0;
-	}
-
-	for (size_t i = 0; i < domain->num_layers; i++) {
-		const access_mask_t handled =
-			landlock_get_fs_access_mask(domain, i);
-
-		masks->access[i] = access_request & handled;
-		handled_accesses |= masks->access[i];
-	}
-	for (size_t i = domain->num_layers; i < ARRAY_SIZE(masks->access); i++)
-		masks->access[i] = 0;
-
-	return handled_accesses;
-}
-
 /*
  * Collect the access bits granted to a single layer by @rule.  A rule
  * stores its layer entries in a sparse array, so iterate and merge the bits
@@ -471,92 +422,6 @@ static access_mask_t rule_layer_access(const struct landlock_rule *const rule,
 	}
 	return granted;
 }
-
-/*
- * Initialise @masks for a refer-path child dentry.  For each layer, the
- * unfulfilled set is the layer's handled FS bits minus whatever bits @dentry
- * already grants at that layer.
- */
-static void init_child_layer_masks(const struct landlock_ruleset *const domain,
-				   struct dentry *const dentry,
-				   struct layer_access_masks *const masks)
-{
-	const struct landlock_rule *const rule = find_rule(domain, dentry);
-
-	for (size_t i = 0; i < domain->num_layers; i++)
-		masks->access[i] = landlock_get_fs_access_mask(domain, i) &
-				   ~rule_layer_access(rule, i);
-	for (size_t i = domain->num_layers; i < ARRAY_SIZE(masks->access); i++)
-		masks->access[i] = 0;
-}
-
-/*
- * Find the youngest (deepest) layer that still has bits set in
- * @access_request, narrow @access_request to that layer's bits, and
- * return the layer's zero-based index.  When no layer has any matching
- * bit, clear @access_request and return the deepest layer index; callers
- * treat this as "all bits allowed".
- */
-static size_t
-landlock_get_denied_layer(const struct landlock_ruleset *const domain,
-			  access_mask_t *const access_request,
-			  const struct layer_access_masks *const masks)
-{
-	for (ssize_t i = ARRAY_SIZE(masks->access) - 1; i >= 0; i--) {
-		if (masks->access[i] & *access_request) {
-			*access_request &= masks->access[i];
-			return i;
-		}
-	}
-
-	*access_request = 0;
-	return domain->num_layers - 1;
-}
-
-#ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
-
-static void test_get_denied_layer(struct kunit *const test)
-{
-	const struct landlock_ruleset dom = {
-		.num_layers = 5,
-	};
-	const struct layer_access_masks masks = {
-		.access[0] = LANDLOCK_ACCESS_FS_EXECUTE |
-			     LANDLOCK_ACCESS_FS_READ_DIR,
-		.access[1] = LANDLOCK_ACCESS_FS_READ_FILE |
-			     LANDLOCK_ACCESS_FS_READ_DIR,
-		.access[2] = LANDLOCK_ACCESS_FS_REMOVE_DIR,
-	};
-	access_mask_t access;
-
-	access = LANDLOCK_ACCESS_FS_EXECUTE;
-	KUNIT_EXPECT_EQ(test, 0, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_EXECUTE);
-
-	access = LANDLOCK_ACCESS_FS_READ_FILE;
-	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_READ_FILE);
-
-	access = LANDLOCK_ACCESS_FS_READ_DIR;
-	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_READ_DIR);
-
-	access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
-	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access,
-			LANDLOCK_ACCESS_FS_READ_FILE |
-				LANDLOCK_ACCESS_FS_READ_DIR);
-
-	access = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_DIR;
-	KUNIT_EXPECT_EQ(test, 1, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_READ_DIR);
-
-	access = LANDLOCK_ACCESS_FS_WRITE_FILE;
-	KUNIT_EXPECT_EQ(test, 4, landlock_get_denied_layer(&dom, &access, &masks));
-	KUNIT_EXPECT_EQ(test, access, 0);
-}
-
-#endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
 
 /**
  * walk_layer - Walk a file hierarchy upward for one Landlock layer
@@ -628,486 +493,107 @@ out:
 }
 
 /*
- * Returns true iff the child file with the given src_child access rights under
- * src_parent would result in having the same or fewer access rights if it were
- * moved under new_parent.
+ * may_refer_layer - Per-layer privilege-escalation check for refer actions
+ *
+ * At a single layer, return true iff moving a child with @src_child_remaining
+ * unfulfilled bits under @src_parent_remaining would not gain new access bits
+ * under @new_parent_remaining.  All inputs are post-walk per-layer remaining
+ * masks (bits the path/dentry did *not* grant at this layer).
+ *
+ * For a non-directory child, only file-applicable bits matter.
  */
-static bool may_refer(const struct layer_access_masks *const src_parent,
-		      const struct layer_access_masks *const src_child,
-		      const struct layer_access_masks *const new_parent,
-		      const bool child_is_dir)
+static bool may_refer_layer(const access_mask_t src_parent_remaining,
+			    const access_mask_t src_child_remaining,
+			    const access_mask_t new_parent_remaining,
+			    const bool child_is_dir)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(new_parent->access); i++) {
-		access_mask_t child_access = src_parent->access[i] &
-					     src_child->access[i];
-		access_mask_t parent_access = new_parent->access[i];
+	access_mask_t child_access =
+		src_parent_remaining & src_child_remaining;
+	access_mask_t parent_access = new_parent_remaining;
 
-		if (!child_is_dir) {
-			child_access &= ACCESS_FILE;
-			parent_access &= ACCESS_FILE;
-		}
-
-		if (!access_mask_subset(child_access, parent_access))
-			return false;
+	if (!child_is_dir) {
+		child_access &= ACCESS_FILE;
+		parent_access &= ACCESS_FILE;
 	}
-	return true;
+	return access_mask_subset(child_access, parent_access);
 }
 
 /*
- * Check that a destination file hierarchy has more restrictions than a source
- * file hierarchy.  This is only used for link and rename actions.
+ * walk_for_refer_layer - Single-layer walk for the refer path
  *
- * Return: True if child1 may be moved from parent1 to parent2 without
- * increasing its access rights (if child2 is set, an additional condition is
- * that child2 may be used from parent2 to parent1 without increasing its access
- * rights), false otherwise.
- */
-static bool no_more_access(const struct layer_access_masks *const parent1,
-			   const struct layer_access_masks *const child1,
-			   const bool child1_is_dir,
-			   const struct layer_access_masks *const parent2,
-			   const struct layer_access_masks *const child2,
-			   const bool child2_is_dir)
-{
-	if (!may_refer(parent1, child1, parent2, child1_is_dir))
-		return false;
-
-	if (!child2)
-		return true;
-
-	return may_refer(parent2, child2, parent1, child2_is_dir);
-}
-
-#define NMA_TRUE(...) KUNIT_EXPECT_TRUE(test, no_more_access(__VA_ARGS__))
-#define NMA_FALSE(...) KUNIT_EXPECT_FALSE(test, no_more_access(__VA_ARGS__))
-
-#ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
-
-static void test_no_more_access(struct kunit *const test)
-{
-	const struct layer_access_masks rx0 = {
-		.access[0] = LANDLOCK_ACCESS_FS_EXECUTE |
-			     LANDLOCK_ACCESS_FS_READ_FILE,
-	};
-	const struct layer_access_masks mx0 = {
-		.access[0] = LANDLOCK_ACCESS_FS_EXECUTE |
-			     LANDLOCK_ACCESS_FS_MAKE_REG,
-	};
-	const struct layer_access_masks x0 = {
-		.access[0] = LANDLOCK_ACCESS_FS_EXECUTE,
-	};
-	const struct layer_access_masks x1 = {
-		.access[1] = LANDLOCK_ACCESS_FS_EXECUTE,
-	};
-	const struct layer_access_masks x01 = {
-		.access[0] = LANDLOCK_ACCESS_FS_EXECUTE,
-		.access[1] = LANDLOCK_ACCESS_FS_EXECUTE,
-	};
-	const struct layer_access_masks allows_all = {};
-
-	/* Checks without restriction. */
-	NMA_TRUE(&x0, &allows_all, false, &allows_all, NULL, false);
-	NMA_TRUE(&allows_all, &x0, false, &allows_all, NULL, false);
-	NMA_FALSE(&x0, &x0, false, &allows_all, NULL, false);
-
-	/*
-	 * Checks that we can only refer a file if no more access could be
-	 * inherited.
-	 */
-	NMA_TRUE(&x0, &x0, false, &rx0, NULL, false);
-	NMA_TRUE(&rx0, &rx0, false, &rx0, NULL, false);
-	NMA_FALSE(&rx0, &rx0, false, &x0, NULL, false);
-	NMA_FALSE(&rx0, &rx0, false, &x1, NULL, false);
-
-	/* Checks allowed referring with different nested domains. */
-	NMA_TRUE(&x0, &x1, false, &x0, NULL, false);
-	NMA_TRUE(&x1, &x0, false, &x0, NULL, false);
-	NMA_TRUE(&x0, &x01, false, &x0, NULL, false);
-	NMA_TRUE(&x0, &x01, false, &rx0, NULL, false);
-	NMA_TRUE(&x01, &x0, false, &x0, NULL, false);
-	NMA_TRUE(&x01, &x0, false, &rx0, NULL, false);
-	NMA_FALSE(&x01, &x01, false, &x0, NULL, false);
-
-	/* Checks that file access rights are also enforced for a directory. */
-	NMA_FALSE(&rx0, &rx0, true, &x0, NULL, false);
-
-	/* Checks that directory access rights don't impact file referring... */
-	NMA_TRUE(&mx0, &mx0, false, &x0, NULL, false);
-	/* ...but only directory referring. */
-	NMA_FALSE(&mx0, &mx0, true, &x0, NULL, false);
-
-	/* Checks directory exchange. */
-	NMA_TRUE(&mx0, &mx0, true, &mx0, &mx0, true);
-	NMA_TRUE(&mx0, &mx0, true, &mx0, &x0, true);
-	NMA_FALSE(&mx0, &mx0, true, &x0, &mx0, true);
-	NMA_FALSE(&mx0, &mx0, true, &x0, &x0, true);
-	NMA_FALSE(&mx0, &mx0, true, &x1, &x1, true);
-
-	/* Checks file exchange with directory access rights... */
-	NMA_TRUE(&mx0, &mx0, false, &mx0, &mx0, false);
-	NMA_TRUE(&mx0, &mx0, false, &mx0, &x0, false);
-	NMA_TRUE(&mx0, &mx0, false, &x0, &mx0, false);
-	NMA_TRUE(&mx0, &mx0, false, &x0, &x0, false);
-	/* ...and with file access rights. */
-	NMA_TRUE(&rx0, &rx0, false, &rx0, &rx0, false);
-	NMA_TRUE(&rx0, &rx0, false, &rx0, &x0, false);
-	NMA_FALSE(&rx0, &rx0, false, &x0, &rx0, false);
-	NMA_FALSE(&rx0, &rx0, false, &x0, &x0, false);
-	NMA_FALSE(&rx0, &rx0, false, &x1, &x1, false);
-
-	/*
-	 * Allowing the following requests should not be a security risk
-	 * because domain 0 denies execute access, and domain 1 is always
-	 * nested with domain 0.  However, adding an exception for this case
-	 * would mean to check all nested domains to make sure none can get
-	 * more privileges (e.g. processes only sandboxed by domain 0).
-	 * Moreover, this behavior (i.e. composition of N domains) could then
-	 * be inconsistent compared to domain 1's ruleset alone (e.g. it might
-	 * be denied to link/rename with domain 1's ruleset, whereas it would
-	 * be allowed if nested on top of domain 0).  Another drawback would be
-	 * to create a cover channel that could enable sandboxed processes to
-	 * infer most of the filesystem restrictions from their domain.  To
-	 * make it simple, efficient, safe, and more consistent, this case is
-	 * always denied.
-	 */
-	NMA_FALSE(&x1, &x1, false, &x0, NULL, false);
-	NMA_FALSE(&x1, &x1, false, &rx0, NULL, false);
-	NMA_FALSE(&x1, &x1, true, &x0, NULL, false);
-	NMA_FALSE(&x1, &x1, true, &rx0, NULL, false);
-
-	/* Checks the same case of exclusive domains with a file... */
-	NMA_TRUE(&x1, &x1, false, &x01, NULL, false);
-	NMA_FALSE(&x1, &x1, false, &x01, &x0, false);
-	NMA_FALSE(&x1, &x1, false, &x01, &x01, false);
-	NMA_FALSE(&x1, &x1, false, &x0, &x0, false);
-	/* ...and with a directory. */
-	NMA_FALSE(&x1, &x1, false, &x0, &x0, true);
-	NMA_FALSE(&x1, &x1, true, &x0, &x0, false);
-	NMA_FALSE(&x1, &x1, true, &x0, &x0, true);
-}
-
-#endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
-
-#undef NMA_TRUE
-#undef NMA_FALSE
-
-static bool is_layer_masks_allowed(const struct layer_access_masks *masks)
-{
-	return mem_is_zero(&masks->access, sizeof(masks->access));
-}
-
-/*
- * Removes @masks accesses that are not requested.
+ * Walk from @start upward to @mnt_dir->dentry (a mount root), then continue
+ * upward through mountpoints.  Decrement @remaining by every rule's
+ * @layer_level bits along the way.
  *
- * Returns true if the request is allowed, false otherwise.
+ * Returns the unfulfilled bits at the end of the walk; 0 means the layer
+ * grants every initially-requested bit somewhere on the way up.
  */
-static bool scope_to_request(const access_mask_t access_request,
-			     struct layer_access_masks *masks)
+static access_mask_t
+walk_for_refer_layer(const struct landlock_ruleset *const domain,
+		     struct dentry *const start,
+		     const struct path *const mnt_dir, const u16 layer_level,
+		     access_mask_t remaining)
 {
-	bool saw_unfulfilled_access = false;
+	struct dentry *walker;
 
-	if (WARN_ON_ONCE(!masks))
-		return true;
+	if (!remaining)
+		return 0;
 
-	for (size_t i = 0; i < ARRAY_SIZE(masks->access); i++) {
-		masks->access[i] &= access_request;
-		if (masks->access[i])
-			saw_unfulfilled_access = true;
+	walker = dget(start);
+	while (true) {
+		struct dentry *parent;
+
+		remaining &= ~rule_layer_access(find_rule(domain, walker),
+						layer_level);
+		if (!remaining || walker == mnt_dir->dentry ||
+		    unlikely(IS_ROOT(walker)))
+			break;
+		parent = dget_parent(walker);
+		dput(walker);
+		walker = parent;
 	}
-	return !saw_unfulfilled_access;
+	dput(walker);
+
+	if (remaining)
+		remaining = walk_layer(domain, mnt_dir, layer_level, remaining);
+	return remaining;
 }
 
 #ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
 
-static void test_scope_to_request_with_exec_none(struct kunit *const test)
+#define MRL_TRUE(...) KUNIT_EXPECT_TRUE(test, may_refer_layer(__VA_ARGS__))
+#define MRL_FALSE(...) KUNIT_EXPECT_FALSE(test, may_refer_layer(__VA_ARGS__))
+
+static void test_may_refer_layer(struct kunit *const test)
 {
-	/* Allows everything. */
-	struct layer_access_masks masks = {};
+	const access_mask_t X = LANDLOCK_ACCESS_FS_EXECUTE;
+	const access_mask_t R = LANDLOCK_ACCESS_FS_READ_FILE;
+	const access_mask_t M = LANDLOCK_ACCESS_FS_MAKE_REG;
+	const access_mask_t XR = X | R;
+	const access_mask_t XM = X | M;
 
-	/* Checks and scopes with execute. */
-	KUNIT_EXPECT_TRUE(test,
-			  scope_to_request(LANDLOCK_ACCESS_FS_EXECUTE, &masks));
-	KUNIT_EXPECT_EQ(test, 0, masks.access[0]);
-}
+	/* Unrestricted destination always accepts. */
+	MRL_TRUE(X, 0, 0, false);
+	MRL_TRUE(0, X, 0, false);
+	MRL_FALSE(X, X, 0, false);
 
-static void test_scope_to_request_with_exec_some(struct kunit *const test)
-{
-	/* Denies execute and write. */
-	struct layer_access_masks masks = {
-		.access[0] = LANDLOCK_ACCESS_FS_EXECUTE,
-		.access[1] = LANDLOCK_ACCESS_FS_WRITE_FILE,
-	};
+	/* Refer requires no inherited access at this layer. */
+	MRL_TRUE(X, X, X, false);
+	MRL_TRUE(XR, XR, XR, false);
+	MRL_FALSE(XR, XR, X, false);
 
-	/* Checks and scopes with execute. */
-	KUNIT_EXPECT_FALSE(test, scope_to_request(LANDLOCK_ACCESS_FS_EXECUTE,
-						  &masks));
-	KUNIT_EXPECT_EQ(test, LANDLOCK_ACCESS_FS_EXECUTE, masks.access[0]);
-	KUNIT_EXPECT_EQ(test, 0, masks.access[1]);
-}
+	/* File-only check ignores directory-only bits. */
+	MRL_TRUE(XM, XM, X, false);
+	MRL_FALSE(XM, XM, X, true);
 
-static void test_scope_to_request_without_access(struct kunit *const test)
-{
-	/* Denies execute and write. */
-	struct layer_access_masks masks = {
-		.access[0] = LANDLOCK_ACCESS_FS_EXECUTE,
-		.access[1] = LANDLOCK_ACCESS_FS_WRITE_FILE,
-	};
-
-	/* Checks and scopes without access request. */
-	KUNIT_EXPECT_TRUE(test, scope_to_request(0, &masks));
-	KUNIT_EXPECT_EQ(test, 0, masks.access[0]);
-	KUNIT_EXPECT_EQ(test, 0, masks.access[1]);
+	/* Disjoint child/parent: child_access is zero, allowed. */
+	MRL_TRUE(X, R, X, false);
 }
 
 #endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
 
-/*
- * Returns true if there is at least one access right different than
- * LANDLOCK_ACCESS_FS_REFER.
- */
-static bool is_eacces(const struct layer_access_masks *masks,
-		      const access_mask_t access_request)
-{
-	if (!masks)
-		return false;
-
-	for (size_t i = 0; i < ARRAY_SIZE(masks->access); i++) {
-		/* LANDLOCK_ACCESS_FS_REFER alone must return -EXDEV. */
-		if (masks->access[i] & access_request &
-		    ~LANDLOCK_ACCESS_FS_REFER)
-			return true;
-	}
-	return false;
-}
-
-#define IE_TRUE(...) KUNIT_EXPECT_TRUE(test, is_eacces(__VA_ARGS__))
-#define IE_FALSE(...) KUNIT_EXPECT_FALSE(test, is_eacces(__VA_ARGS__))
-
-#ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
-
-static void test_is_eacces_with_none(struct kunit *const test)
-{
-	const struct layer_access_masks masks = {};
-
-	IE_FALSE(&masks, 0);
-	IE_FALSE(&masks, LANDLOCK_ACCESS_FS_REFER);
-	IE_FALSE(&masks, LANDLOCK_ACCESS_FS_EXECUTE);
-	IE_FALSE(&masks, LANDLOCK_ACCESS_FS_WRITE_FILE);
-}
-
-static void test_is_eacces_with_refer(struct kunit *const test)
-{
-	const struct layer_access_masks masks = {
-		.access[0] = LANDLOCK_ACCESS_FS_REFER,
-	};
-
-	IE_FALSE(&masks, 0);
-	IE_FALSE(&masks, LANDLOCK_ACCESS_FS_REFER);
-	IE_FALSE(&masks, LANDLOCK_ACCESS_FS_EXECUTE);
-	IE_FALSE(&masks, LANDLOCK_ACCESS_FS_WRITE_FILE);
-}
-
-static void test_is_eacces_with_write(struct kunit *const test)
-{
-	const struct layer_access_masks masks = {
-		.access[0] = LANDLOCK_ACCESS_FS_WRITE_FILE,
-	};
-
-	IE_FALSE(&masks, 0);
-	IE_FALSE(&masks, LANDLOCK_ACCESS_FS_REFER);
-	IE_FALSE(&masks, LANDLOCK_ACCESS_FS_EXECUTE);
-
-	IE_TRUE(&masks, LANDLOCK_ACCESS_FS_WRITE_FILE);
-}
-
-#endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
-
-#undef IE_TRUE
-#undef IE_FALSE
-
-/**
- * is_access_to_paths_allowed - Check accesses for requests with a common path
- *
- * @domain: Domain to check against.
- * @path: File hierarchy to walk through.  For refer checks, this would be
- *     the common mountpoint.
- * @access_request_parent1: Accesses to check, once @layer_masks_parent1 is
- *     equal to @layer_masks_parent2 (if any).  This is tied to the unique
- *     requested path for most actions, or the source in case of a refer action
- *     (i.e. rename or link), or the source and destination in case of
- *     RENAME_EXCHANGE.
- * @layer_masks_parent1: Pointer to a matrix of layer masks per access
- *     masks, identifying the layers that forbid a specific access.  Bits from
- *     this matrix can be unset according to the @path walk.  An empty matrix
- *     means that @domain allows all possible Landlock accesses (i.e. not only
- *     those identified by @access_request_parent1).  This matrix can
- *     initially refer to domain layer masks and, when the accesses for the
- *     destination and source are the same, to requested layer masks.
- * @log_request_parent1: Audit request to fill if the related access is denied.
- * @dentry_child1: Dentry to the initial child of the parent1 path.  This
- *     pointer must be NULL for non-refer actions (i.e. not link nor rename).
- * @access_request_parent2: Similar to @access_request_parent1 but for a
- *     request involving a source and a destination.  This refers to the
- *     destination, except in case of RENAME_EXCHANGE where it also refers to
- *     the source.  Must be set to 0 when using a simple path request.
- * @layer_masks_parent2: Similar to @layer_masks_parent1 but for a refer
- *     action.  This must be NULL otherwise.
- * @log_request_parent2: Audit request to fill if the related access is denied.
- * @dentry_child2: Dentry to the initial child of the parent2 path.  This
- *     pointer is only set for RENAME_EXCHANGE actions and must be NULL
- *     otherwise.
- *
- * This helper first checks that the destination has a superset of restrictions
- * compared to the source (if any) for a common path.  Because of
- * RENAME_EXCHANGE actions, source and destinations may be swapped.  It then
- * checks that the collected accesses and the remaining ones are enough to
- * allow the request.
- *
- * Return: True if the access request is granted, false otherwise.
- */
-static bool
-is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
-			   const struct path *const path,
-			   const access_mask_t access_request_parent1,
-			   struct layer_access_masks *layer_masks_parent1,
-			   struct landlock_request *const log_request_parent1,
-			   struct dentry *const dentry_child1,
-			   const access_mask_t access_request_parent2,
-			   struct layer_access_masks *layer_masks_parent2,
-			   struct landlock_request *const log_request_parent2,
-			   struct dentry *const dentry_child2)
-{
-	bool allowed_parent1, allowed_parent2;
-	bool child1_is_directory = true, child2_is_directory = true;
-	bool is_dom_check;
-	access_mask_t access_masked_parent1, access_masked_parent2;
-	struct layer_access_masks _layer_masks_child1, _layer_masks_child2;
-	struct layer_access_masks *layer_masks_child1 = NULL,
-				  *layer_masks_child2 = NULL;
-
-	if (!access_request_parent1 && !access_request_parent2)
-		return true;
-
-	if (WARN_ON_ONCE(!path))
-		return true;
-
-	if (is_nouser_or_private(path->dentry))
-		return true;
-
-	if (WARN_ON_ONCE(!layer_masks_parent1))
-		return false;
-
-	if (unlikely(layer_masks_parent2)) {
-		if (WARN_ON_ONCE(!dentry_child1))
-			return false;
-
-		/*
-		 * For a double request, first check for potential privilege
-		 * escalation by looking at domain handled accesses (which are
-		 * a superset of the meaningful requested accesses).
-		 */
-		access_masked_parent1 = access_masked_parent2 =
-			landlock_union_access_masks(domain).fs;
-		is_dom_check = true;
-	} else {
-		if (WARN_ON_ONCE(dentry_child1 || dentry_child2))
-			return false;
-		/* For a simple request, only check for requested accesses. */
-		access_masked_parent1 = access_request_parent1;
-		access_masked_parent2 = access_request_parent2;
-		is_dom_check = false;
-	}
-
-	if (unlikely(dentry_child1)) {
-		init_child_layer_masks(domain, dentry_child1,
-				       &_layer_masks_child1);
-		layer_masks_child1 = &_layer_masks_child1;
-		child1_is_directory = d_is_dir(dentry_child1);
-	}
-	if (unlikely(dentry_child2)) {
-		init_child_layer_masks(domain, dentry_child2,
-				       &_layer_masks_child2);
-		layer_masks_child2 = &_layer_masks_child2;
-		child2_is_directory = d_is_dir(dentry_child2);
-	}
-
-	/*
-	 * Walk the path once per layer, each walk tracking a single access
-	 * mask.  The earlier implementation walked the path a single time
-	 * while maintaining a per-layer matrix in parallel; because every
-	 * rule acts layer-by-layer anyway, computing one layer at a time
-	 * makes each walk self-contained and lets it exit as soon as the
-	 * layer has been granted every requested access.
-	 */
-	for (u16 i = 0; i < domain->num_layers; i++) {
-		layer_masks_parent1->access[i] = walk_layer(
-			domain, path, i, layer_masks_parent1->access[i]);
-		if (layer_masks_parent2)
-			layer_masks_parent2->access[i] =
-				walk_layer(domain, path, i,
-					   layer_masks_parent2->access[i]);
-	}
-
-	/*
-	 * For a refer check the walk was done against the full set of domain
-	 * handled accesses.  If the remaining per-layer restrictions on the
-	 * destination are a subset of those on the source, there is no
-	 * privilege escalation risk and we can downgrade to the actually
-	 * requested accesses.  Otherwise the access is only granted when the
-	 * wider per-layer mask has been fully fulfilled.
-	 *
-	 * Evaluating no_more_access() once at the end is equivalent to the
-	 * earlier mid-walk check because both no_more_access() and
-	 * is_layer_masks_allowed() are monotonic: rules only clear bits from
-	 * the matrices, which can only make the subset relation become true
-	 * and matrices become fully zero.
-	 */
-	if (is_dom_check &&
-	    no_more_access(layer_masks_parent1, layer_masks_child1,
-			   child1_is_directory, layer_masks_parent2,
-			   layer_masks_child2, child2_is_directory)) {
-		access_masked_parent1 = access_request_parent1;
-		access_masked_parent2 = access_request_parent2;
-		allowed_parent1 = scope_to_request(access_masked_parent1,
-						   layer_masks_parent1);
-		allowed_parent2 = scope_to_request(access_masked_parent2,
-						   layer_masks_parent2);
-	} else {
-		allowed_parent1 = is_layer_masks_allowed(layer_masks_parent1);
-		allowed_parent2 = !layer_masks_parent2 ||
-				  is_layer_masks_allowed(layer_masks_parent2);
-	}
-
-	/*
-	 * Check CONFIG_AUDIT to enable elision of log_request_parent* and
-	 * associated caller's stack variables thanks to dead code elimination.
-	 */
-#ifdef CONFIG_AUDIT
-	/*
-	 * Fill in the type, path and the broad access mask that was checked.
-	 * Callers are responsible for narrowing @access to the bits that were
-	 * actually denied and for populating @layer_plus_one (usually via
-	 * landlock_get_denied_layer()) before calling landlock_log_denial();
-	 * a non-zero @access on return is also the caller-facing signal that
-	 * a given parent was denied.
-	 */
-	if (!allowed_parent1 && log_request_parent1) {
-		log_request_parent1->type = LANDLOCK_REQUEST_FS_ACCESS;
-		log_request_parent1->audit.type = LSM_AUDIT_DATA_PATH;
-		log_request_parent1->audit.u.path = *path;
-		log_request_parent1->access = access_masked_parent1;
-	}
-
-	if (!allowed_parent2 && log_request_parent2) {
-		log_request_parent2->type = LANDLOCK_REQUEST_FS_ACCESS;
-		log_request_parent2->audit.type = LSM_AUDIT_DATA_PATH;
-		log_request_parent2->audit.u.path = *path;
-		log_request_parent2->access = access_masked_parent2;
-	}
-#endif /* CONFIG_AUDIT */
-
-	return allowed_parent1 && allowed_parent2;
-}
+#undef MRL_TRUE
+#undef MRL_FALSE
 
 /**
  * walk_path_per_layer - Per-layer path walk, storing one remaining mask per layer
@@ -1230,78 +716,6 @@ static access_mask_t maybe_remove(const struct dentry *const dentry)
 }
 
 /**
- * collect_domain_accesses - Walk through a file path and collect accesses
- *
- * @domain: Domain to check against.
- * @mnt_root: Last directory to check.
- * @dir: Directory to start the walk from.
- * @layer_masks_dom: Where to store the collected accesses.
- *
- * This helper is useful to begin a path walk from the @dir directory to a
- * @mnt_root directory used as a mount point.  This mount point is the common
- * ancestor between the source and the destination of a renamed and linked
- * file.  While walking from @dir to @mnt_root, we record all the domain's
- * allowed accesses in @layer_masks_dom.
- *
- * Because of disconnected directories, this walk may not reach @mnt_dir.  In
- * this case, the walk will continue to @mnt_dir after this call.
- *
- * This is similar to is_access_to_paths_allowed() but much simpler because it
- * only handles walking on the same mount point and only checks one set of
- * accesses.
- *
- * Return: True if all the domain access rights are allowed for @dir, false if
- * the walk reached @mnt_root.
- */
-static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
-				    const struct dentry *const mnt_root,
-				    struct dentry *dir,
-				    struct layer_access_masks *layer_masks_dom)
-{
-	if (WARN_ON_ONCE(!domain || !mnt_root || !dir || !layer_masks_dom))
-		return true;
-	if (is_nouser_or_private(dir))
-		return true;
-
-	if (!init_fs_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
-				 layer_masks_dom))
-		return true;
-
-	/*
-	 * Walk once per layer, clearing bits from each layer's unfulfilled
-	 * access mask independently, up to the mount root (or the filesystem
-	 * root for a disconnected directory).
-	 */
-	for (u16 i = 0; i < domain->num_layers; i++) {
-		access_mask_t remaining = layer_masks_dom->access[i];
-		struct dentry *walker;
-
-		if (!remaining)
-			continue;
-
-		walker = dget(dir);
-		while (true) {
-			struct dentry *parent;
-
-			remaining &= ~rule_layer_access(
-				find_rule(domain, walker), i);
-			if (!remaining)
-				break;
-			if (walker == mnt_root || unlikely(IS_ROOT(walker)))
-				break;
-
-			parent = dget_parent(walker);
-			dput(walker);
-			walker = parent;
-		}
-		dput(walker);
-		layer_masks_dom->access[i] = remaining;
-	}
-
-	return is_layer_masks_allowed(layer_masks_dom);
-}
-
-/**
  * current_check_refer_path - Check if a rename or link action is allowed
  *
  * @old_dentry: File or directory requested to be moved or linked.
@@ -1331,23 +745,13 @@ static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
  * because file creation is allowed on the destination directory but not direct
  * linking.
  *
- * To achieve this goal, the kernel needs to compare two file hierarchies: the
- * one identifying the source file or directory (including itself), and the
- * destination one.  This can be seen as a multilayer partial ordering problem.
- * The kernel walks through these paths and collects in a matrix the access
- * rights that are denied per layer.  These matrices are then compared to see
- * if the destination one has more (or the same) restrictions as the source
- * one.  If this is the case, the requested action will not return EXDEV, which
- * doesn't mean the action is allowed.  The parent hierarchy of the source
- * (i.e. parent directory), and the destination hierarchy must also be checked
- * to verify that they explicitly allow such action (i.e.  referencing,
- * creation and potentially removal rights).  The kernel implementation is then
- * required to rely on potentially four matrices of access rights: one for the
- * source file or directory (i.e. the child), a potentially other one for the
- * other source/destination (in case of RENAME_EXCHANGE), one for the source
- * parent hierarchy and a last one for the destination hierarchy.  These
- * ephemeral matrices take some space on the stack, which limits the number of
- * layers to a deemed reasonable number: 16.
+ * To achieve this goal, the kernel walks each parent hierarchy once per
+ * layer (the same per-layer walk shape as the rest of Landlock's fs
+ * checks), tracks the per-layer "still unfulfilled" bits as plain
+ * access_mask_t arrays on the stack, and evaluates the privilege
+ * escalation predicate as a per-layer subset check across the source and
+ * destination remaining masks.  Stack usage scales with
+ * LANDLOCK_MAX_NUM_LAYERS (currently 16).
  *
  * Return: 0 if access is allowed, -EXDEV if @old_dentry would inherit new
  * access rights from @new_dir, or -EACCES if file removal or creation is
@@ -1360,16 +764,14 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 {
 	const struct landlock_cred_security *const subject =
 		landlock_get_applicable_subject(current_cred(), any_fs, NULL);
-	bool allow_parent1, allow_parent2;
+	const struct landlock_ruleset *domain;
 	access_mask_t access_request_parent1, access_request_parent2;
 	struct path mnt_dir;
 	struct dentry *old_parent;
-	struct layer_access_masks layer_masks_parent1 = {},
-				  layer_masks_parent2 = {};
-	struct landlock_request request1 = {}, request2 = {};
 
 	if (!subject)
 		return 0;
+	domain = subject->domain;
 
 	if (unlikely(d_is_negative(old_dentry)))
 		return -ENOENT;
@@ -1401,12 +803,11 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 		access_mask_t unfulfilled;
 		size_t denying_layer;
 
-		walk_path_per_layer(subject->domain, new_dir,
+		walk_path_per_layer(domain, new_dir,
 				    access_request_parent1 |
 					    access_request_parent2,
 				    remaining);
-		if (reduce_to_youngest_denier(remaining,
-					      subject->domain->num_layers,
+		if (reduce_to_youngest_denier(remaining, domain->num_layers,
 					      &unfulfilled, &denying_layer))
 			return 0;
 
@@ -1437,64 +838,135 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 	old_parent = (old_dentry == mnt_dir.dentry) ? old_dentry :
 						      old_dentry->d_parent;
 
-	/* new_dir->dentry is equal to new_dentry->d_parent */
-	allow_parent1 = collect_domain_accesses(subject->domain, mnt_dir.dentry,
-						old_parent,
-						&layer_masks_parent1);
-	allow_parent2 = collect_domain_accesses(subject->domain, mnt_dir.dentry,
-						new_dir->dentry,
-						&layer_masks_parent2);
+	{
+		const struct landlock_rule *const child1_rule =
+			find_rule(domain, old_dentry);
+		const struct landlock_rule *const child2_rule =
+			exchange ? find_rule(domain, new_dentry) : NULL;
+		const bool child1_is_dir = d_is_dir(old_dentry);
+		const bool child2_is_dir =
+			exchange ? d_is_dir(new_dentry) : true;
+		const bool old_parent_private =
+			is_nouser_or_private(old_parent);
+		const bool new_parent_private =
+			is_nouser_or_private(new_dir->dentry);
+		access_mask_t p1[LANDLOCK_MAX_NUM_LAYERS] = {};
+		access_mask_t p2[LANDLOCK_MAX_NUM_LAYERS] = {};
+		access_mask_t scope1, scope2;
+		access_mask_t youngest1 = 0, youngest2 = 0;
+		size_t layer1 = 0, layer2 = 0;
+		bool dom_ok = true;
+		bool eacces1 = false, eacces2 = false;
 
-	if (allow_parent1 && allow_parent2)
-		return 0;
+		/*
+		 * Outer per-layer loop: walk both parent hierarchies (source
+		 * and destination), compute each layer's still-unfulfilled
+		 * bits against the full domain-handled set, derive the
+		 * children's per-layer remaining masks from their dentry rule,
+		 * and evaluate the privilege escalation predicate locally.
+		 */
+		for (u16 i = 0; i < domain->num_layers; i++) {
+			const access_mask_t handled =
+				landlock_get_fs_access_mask(domain, i);
+			access_mask_t r1 =
+				old_parent_private ? 0 : handled;
+			access_mask_t r2 =
+				new_parent_private ? 0 : handled;
+			const access_mask_t c1 =
+				handled &
+				~rule_layer_access(child1_rule, i);
+			const access_mask_t c2 =
+				exchange ?
+					handled & ~rule_layer_access(
+							  child2_rule, i) :
+					0;
 
-	/*
-	 * To be able to compare source and destination domain access rights,
-	 * take into account the @old_dentry access rights aggregated with its
-	 * parent access rights.  This will be useful to compare with the
-	 * destination parent access rights.
-	 */
-	if (is_access_to_paths_allowed(
-		    subject->domain, &mnt_dir, access_request_parent1,
-		    &layer_masks_parent1, &request1, old_dentry,
-		    access_request_parent2, &layer_masks_parent2, &request2,
-		    exchange ? new_dentry : NULL))
-		return 0;
+			if (r1)
+				r1 = walk_for_refer_layer(domain, old_parent,
+							  &mnt_dir, i, r1);
+			if (r2)
+				r2 = walk_for_refer_layer(domain,
+							  new_dir->dentry,
+							  &mnt_dir, i, r2);
+			p1[i] = r1;
+			p2[i] = r2;
 
-	if (request1.access) {
-		request1.audit.u.path.dentry = old_parent;
-		request1.layer_plus_one =
-			landlock_get_denied_layer(subject->domain,
-						  &request1.access,
-						  &layer_masks_parent1) +
-			1;
-		landlock_log_denial(subject, &request1);
+			if (!may_refer_layer(r1, c1, r2, child1_is_dir))
+				dom_ok = false;
+			if (exchange &&
+			    !may_refer_layer(r2, c2, r1, child2_is_dir))
+				dom_ok = false;
+		}
+
+		/*
+		 * If no privilege escalation is possible, narrow the denial
+		 * check to the actually-requested bits.  Otherwise the layer's
+		 * full handled set must have been fully granted somewhere on
+		 * the path, or refer is denied.
+		 */
+		if (dom_ok) {
+			scope1 = access_request_parent1;
+			scope2 = access_request_parent2;
+		} else {
+			scope1 = scope2 =
+				landlock_union_access_masks(domain).fs;
+		}
+
+		for (u16 i = 0; i < domain->num_layers; i++) {
+			const access_mask_t s1 = p1[i] & scope1;
+			const access_mask_t s2 = p2[i] & scope2;
+
+			if (s1) {
+				youngest1 = s1;
+				layer1 = i;
+			}
+			if (s2) {
+				youngest2 = s2;
+				layer2 = i;
+			}
+			/*
+			 * EACCES vs EXDEV: any non-REFER bit unmet against
+			 * the original request is a hard deny; REFER alone
+			 * yields EXDEV.
+			 */
+			if (p1[i] & access_request_parent1 &
+			    ~LANDLOCK_ACCESS_FS_REFER)
+				eacces1 = true;
+			if (p2[i] & access_request_parent2 &
+			    ~LANDLOCK_ACCESS_FS_REFER)
+				eacces2 = true;
+		}
+
+		if (!youngest1 && !youngest2)
+			return 0;
+
+		if (youngest1)
+			landlock_log_denial(
+				subject,
+				&(struct landlock_request){
+					.type = LANDLOCK_REQUEST_FS_ACCESS,
+					.audit.type = LSM_AUDIT_DATA_PATH,
+					.audit.u.path.mnt = mnt_dir.mnt,
+					.audit.u.path.dentry = old_parent,
+					.access = youngest1,
+					.layer_plus_one = layer1 + 1,
+				});
+		if (youngest2)
+			landlock_log_denial(
+				subject,
+				&(struct landlock_request){
+					.type = LANDLOCK_REQUEST_FS_ACCESS,
+					.audit.type = LSM_AUDIT_DATA_PATH,
+					.audit.u.path.mnt = mnt_dir.mnt,
+					.audit.u.path.dentry = new_dir->dentry,
+					.access = youngest2,
+					.layer_plus_one = layer2 + 1,
+				});
+
+		if (likely(eacces1 || eacces2))
+			return -EACCES;
+		return -EXDEV;
 	}
-	if (request2.access) {
-		request2.audit.u.path.dentry = new_dir->dentry;
-		request2.layer_plus_one =
-			landlock_get_denied_layer(subject->domain,
-						  &request2.access,
-						  &layer_masks_parent2) +
-			1;
-		landlock_log_denial(subject, &request2);
-	}
-
-	/*
-	 * This prioritizes EACCES over EXDEV for all actions, including
-	 * renames with RENAME_EXCHANGE.
-	 */
-	if (likely(is_eacces(&layer_masks_parent1, access_request_parent1) ||
-		   is_eacces(&layer_masks_parent2, access_request_parent2)))
-		return -EACCES;
-
-	/*
-	 * Gracefully forbids reparenting if the destination directory
-	 * hierarchy is not a superset of restrictions of the source directory
-	 * hierarchy, or if LANDLOCK_ACCESS_FS_REFER is not allowed by the
-	 * source or the destination.
-	 */
-	return -EXDEV;
 }
 
 /* Inode hooks */
@@ -2260,13 +1732,7 @@ __init void landlock_add_fs_hooks(void)
 
 /* clang-format off */
 static struct kunit_case test_cases[] = {
-	KUNIT_CASE(test_no_more_access),
-	KUNIT_CASE(test_scope_to_request_with_exec_none),
-	KUNIT_CASE(test_scope_to_request_with_exec_some),
-	KUNIT_CASE(test_scope_to_request_without_access),
-	KUNIT_CASE(test_is_eacces_with_none),
-	KUNIT_CASE(test_is_eacces_with_refer),
-	KUNIT_CASE(test_is_eacces_with_write),
+	KUNIT_CASE(test_may_refer_layer),
 	{}
 };
 /* clang-format on */
