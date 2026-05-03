@@ -402,15 +402,17 @@ static const struct access_masks any_fs = {
 };
 
 /**
- * struct layer_access_masks - A boolean matrix of layers and access rights
+ * struct layer_access_masks - Per-layer matrix of unfulfilled access rights
  *
- * This has a bit for each combination of layer numbers and access rights.
- * During refer (link / rename) checks, it is used to represent the access
- * rights for each layer which still need to be fulfilled.  When all bits
- * are 0, the access request is considered to be fulfilled.
+ * Tracks, for every Landlock layer of a domain, which bits of an access
+ * request are still unsatisfied.  All bits zero means the request is fully
+ * granted.
  *
- * Only the refer code path still builds a full matrix; every other Landlock
- * fs check works with plain access_mask_t arrays or scalars.
+ * This type is private to the filesystem refer path (link / rename), which
+ * is the only Landlock check that needs cross-layer bookkeeping (cf.
+ * no_more_access()).  All other fs checks work with plain access_mask_t
+ * scalars or arrays.  Do not export this struct outside of fs.c, and do not
+ * grow new callers in non-refer code paths.
  */
 struct layer_access_masks {
 	access_mask_t access[LANDLOCK_MAX_NUM_LAYERS];
