@@ -5,10 +5,16 @@
 #
 # Builds fs_bench / net_bench / scoped_bench from the current selftests
 # tree, bundles them into a copy of the initramfs-base.cpio shared with
-# ,kselftests, and boots that initramfs in QEMU once per kernel.  The
-# benches sweep baseline + 1, 2, 4, 8 layers on their own when invoked
-# without arguments by rcS, so one boot per kernel produces the full
-# data set.
+# ,kselftests, and boots that initramfs in QEMU once per kernel.
+#
+# The bench binaries are shipped under *.bin names and a small wrapper
+# shell script (named like the bench so rcS picks it up via the
+# `_bench$` glob) drives the desired sweep:
+#   fs_bench     baseline + 1,2,4,8,16 layers, at depths 10/100/1000/10000
+#   net_bench    baseline + 1,2,4,8,16 layers
+#   scoped_bench baseline + 1,2,4,8,16 layers
+# The wrapper also echoes its own /ctests/<name> path so the log parser
+# can attribute scenarios to a bench.
 #
 # Usage:
 #   bench_compare.sh -A bzImage-A -B bzImage-B [-a label-A] [-b label-B] \
@@ -93,8 +99,32 @@ for b in fs_bench net_bench scoped_bench; do
 done
 
 mkdir "$WORK/ctests"
-cp "$BENCH_DIR/fs_bench" "$BENCH_DIR/net_bench" "$BENCH_DIR/scoped_bench" \
-    "$WORK/ctests/"
+# Real bench binaries — renamed to *.bin so the rcS `_bench$` glob does
+# not pick them up directly; the wrapper scripts below invoke them with
+# our chosen sweep.
+cp "$BENCH_DIR/fs_bench"     "$WORK/ctests/fs_bench.bin"
+cp "$BENCH_DIR/net_bench"    "$WORK/ctests/net_bench.bin"
+cp "$BENCH_DIR/scoped_bench" "$WORK/ctests/scoped_bench.bin"
+
+cat >"$WORK/ctests/fs_bench" <<'EOF'
+#!/bin/sh
+echo /ctests/fs_bench
+for d in 10 100 1000 10000; do
+    /ctests/fs_bench.bin -L -d "$d" -l 1,2,4,8,16
+done
+EOF
+cat >"$WORK/ctests/net_bench" <<'EOF'
+#!/bin/sh
+echo /ctests/net_bench
+/ctests/net_bench.bin -L -l 1,2,4,8,16
+EOF
+cat >"$WORK/ctests/scoped_bench" <<'EOF'
+#!/bin/sh
+echo /ctests/scoped_bench
+/ctests/scoped_bench.bin -L -l 1,2,4,8,16
+EOF
+chmod +x "$WORK/ctests/fs_bench" "$WORK/ctests/net_bench" \
+    "$WORK/ctests/scoped_bench"
 
 INITRAMFS="$WORK/initramfs"
 cp "$INITRAMFS_BASE" "$INITRAMFS"
@@ -103,7 +133,7 @@ cp "$INITRAMFS_BASE" "$INITRAMFS"
 run_qemu() {
     local kernel="$1"
     local outlog="$2"
-    timeout 300 qemu-system-x86_64 \
+    timeout 3000 qemu-system-x86_64 \
         -nographic \
         -smp 2 \
         -m 2G \
@@ -115,18 +145,27 @@ run_qemu() {
 }
 
 # Parse a serial log into TSV rows: "KEY<TAB>SYS<TAB>USER".
-# KEY is e.g. "fs_bench / baseline" or "fs_bench / 4 domains".
+# KEY is e.g. "fs_bench / depth=100, baseline" or
+# "net_bench / 4 domains".  fs_bench's leading "<D> dirs, ..." info
+# line carries the directory depth; net_bench / scoped_bench omit it.
 parse_log() {
     awk '
         { sub(/\r$/, "") }
         /^\/ctests\// {
             bench=$0
             sub(/^\/ctests\//, "", bench)
-            scenario=""
+            scenario=""; depth=""
             sys=""; usr=""
             next
         }
-        /^\*\*\* Benchmark \*\*\*$/ { scenario="?"; sys=""; usr=""; next }
+        /^\*\*\* Benchmark \*\*\*$/ {
+            scenario=""; depth=""; sys=""; usr=""; next
+        }
+        # The fs_bench info line has the form:
+        #   "<D> dirs, <N> iterations, [without Landlock|<K> Landlock domain(s)]"
+        # so capture the depth here but fall through to the rules
+        # below that classify the scenario.
+        /^[0-9]+ dirs,/ { depth=$1 }
         /Landlock domain/ {
             # "... N Landlock domain(s)"
             for (i=1; i<=NF; i++)
@@ -134,15 +173,25 @@ parse_log() {
                     scenario = $i " domains"
                     break
                 }
+            if (depth != "")
+                scenario = "depth=" depth ", " scenario
             next
         }
-        /without Landlock/ { scenario="baseline"; next }
+        /without Landlock/ {
+            scenario = "baseline"
+            if (depth != "")
+                scenario = "depth=" depth ", " scenario
+            next
+        }
         /^System:/ { sys=$2 }
         /^User/ { usr=$3 }
-        /^\*\*\* Benchmark concluded/ {
-            if (bench != "" && scenario != "")
+        # The bench prints "*** Benchmark concluded ***" before the
+        # System/User lines, so trigger on the trailing "Clocks per
+        # second:" line which is the final line of each scenario.
+        /^Clocks per second:/ {
+            if (bench != "" && scenario != "" && sys != "")
                 print bench " / " scenario "\t" sys "\t" usr
-            scenario=""
+            scenario=""; depth=""; sys=""; usr=""
         }
     '
 }
@@ -201,14 +250,25 @@ emit_html() {
 import json, sys, html, re
 path, label_a, label_b, kernel_a, kernel_b = sys.argv[1:6]
 
-# Preserve a natural scenario ordering.
+# Preserve a natural scenario ordering: group by depth (if any), then
+# baseline first, then increasing domain count.
 def scen_key(s):
+    m = re.match(r"depth=(\d+), (.*)", s)
+    if m:
+        depth = int(m.group(1))
+        rest = m.group(2)
+        if rest == "baseline":
+            return (1, depth, 0, 0)
+        m2 = re.match(r"(\d+) domains", rest)
+        if m2:
+            return (1, depth, 1, int(m2.group(1)))
+        return (1, depth, 2, 0)
     if s == "baseline":
-        return (0, 0)
+        return (0, 0, 0, 0)
     m = re.match(r"(\d+) domains", s)
     if m:
-        return (1, int(m.group(1)))
-    return (2, s)
+        return (0, 0, 1, int(m.group(1)))
+    return (2, 0, 0, 0)
 
 charts = {}  # bench -> {scenario: (sa, sb)}
 with open(path) as f:
