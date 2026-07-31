@@ -556,6 +556,9 @@ in the running kernel.
 .. kernel-doc:: security/landlock/errata/abi-1.h
     :doc: erratum_3
 
+.. kernel-doc:: security/landlock/errata/abi-1.h
+    :doc: erratum_4
+
 How to check for errata
 ~~~~~~~~~~~~~~~~~~~~~~~
 
