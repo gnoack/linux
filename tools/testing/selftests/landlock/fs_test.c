@@ -2351,7 +2351,7 @@ TEST_F_FORK(layout1, rename_whiteout_reparenting)
 	EXPECT_TRUE(S_ISFIFO(st.st_mode));
 }
 
-TEST_F_FORK(layout1, rename_exchange_whiteout)
+TEST_F_FORK(layout1, rename_whiteout_exchange)
 {
 	const char *const whiteout_s3d3 = TMP_DIR "/s3d1/s3d2/s3d3/f2";
 	const struct rule rules[] = {
@@ -3431,7 +3431,12 @@ TEST_F_FORK(layout1, make_char)
 
 TEST_F_FORK(layout1, make_whiteout)
 {
-	/* Creates a whiteout object (creation guarded by MAKE_REG). */
+	/*
+	 * Creates a whiteout object (creation guarded by MAKE_REG).
+	 *
+	 * Contrary to the other character devices, this does not require
+	 * CAP_MKNOD, cf. vfs_mknod().
+	 */
 	test_make_file(_metadata, LANDLOCK_ACCESS_FS_MAKE_REG, S_IFCHR,
 		       makedev(0, 0));
 }
