@@ -7132,8 +7132,8 @@ TEST_F_FORK(layout2_overlay, same_content_different_file)
 
 TEST_F_FORK(layout2_overlay, rename_in_overlay_without_make_reg)
 {
+	const char *const merge_pl1_renamed = MERGE_DATA "/pl1_renamed";
 	struct stat st;
-	const char *merge_pl1_renamed = MERGE_DATA "/pl1_renamed";
 
 	if (self->skip_test)
 		SKIP(return, "overlayfs is not supported (test)");
@@ -7149,6 +7149,10 @@ TEST_F_FORK(layout2_overlay, rename_in_overlay_without_make_reg)
 
 	/* MAKE_REG is restricted, but MAKE_FIFO is not. */
 	enforce_fs(_metadata, LANDLOCK_ACCESS_FS_MAKE_REG, NULL);
+
+	/* Checks that the restriction is effective. */
+	ASSERT_EQ(-1, mknod(MERGE_DATA "/reg1", S_IFREG | 0600, 0));
+	ASSERT_EQ(EACCES, errno);
 
 	/*
 	 * Execute a FIFO rename within OverlayFS.  merge_pl1 originates from
