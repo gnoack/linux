@@ -1,0 +1,365 @@
+Hello!
+
+As discussed in [1], the renameat2() syscall's RENAME_WHITEOUT flag allows
+the creation of chardev directory entries with major=minor=0 as "whiteout
+objects" in the location of the rename source file [2].
+
+This functionality is available even without having any OverlayFS mounted
+and can be invoked with the regular renameat2(2) syscall [3].
+
+In V1 [5], it was discussed that whiteout objects are not the same as character
+devices, and should therefore be treated differently.  After considering a new
+access right in V2 and V3, we eventually settled on guarding it with the
+existing LANDLOCK_ACCESS_FS_MAKE_REG access right and introducing a new erratum
+[6].
+
+V6 addresses the remaining review feedback: the V4 feedback on the selftests
+in patches 3/5 and 4/5, and the V5 remarks on the get_dentry_access() helper.
+
+Motivation
+==========
+
+The RENAME_WHITEOUT flag side-steps all of the existing Landlock access
+rights, which are designed to restrict the creation of directory entries.
+It is desirable to restrict that.
+
+This patch set fixes that by adding a check in Landlock's path_rename and
+path_mknod hooks.
+
+
+[1] https://lore.kernel.org/all/adUBCQXrt7kmgqJT@google.com/
+[2] https://docs.kernel.org/filesystems/overlayfs.html#whiteouts-and-opaque-directories
+[3] https://man7.org/linux/man-pages/man2/renameat2.2.html#DESCRIPTION
+[4] https://codesearch.debian.net/search?q=rename.*RENAME_WHITEOUT&literal=0
+[5] https://lore.kernel.org/all/20260411090944.3131168-2-gnoack@google.com/
+[6] https://lore.kernel.org/all/20260720.chow9ohYie5b@digikod.net/
+
+Changelog
+=========
+
+v6:
+ - Smaller code changes:
+   - get_dentry_access(): Drop the incorrect __attribute_const__ and use a
+     local inode variable
+ - Fix a LANDLOCK_ACCESS_FS_MAKE_REG typo in the commit message of patch 2/5
+ - Tests, addressing the remaining v4 feedback on patch 3/5:
+   - Add rename_whiteout_allowed: RENAME_WHITEOUT works when MAKE_REG is
+     granted, and the whiteout object shows up in the source location
+   - Add rename_whiteout_reparenting: the MAKE_REG right for the created
+     whiteout object is required in the source directory of the rename
+   - Add rename_exchange_whiteout: RENAME_EXCHANGE of an existing whiteout
+     object requires MAKE_REG in the directory which the whiteout moves into
+   - Add audit test make_whiteout: denied whiteout creation is logged with
+     blockers=fs.make_reg (previously fs.make_char)
+ - Tests, addressing the v4 feedback on patch 4/5:
+   - Rework the OverlayFS rename test to rename a FIFO which genuinely
+     originates from the lower layer, instead of preparing it in the upper
+     layer with unlink() and mknod(); the unlink() had already created the
+     whiteout in the upper layer before Landlock was enforced
+   - Check that the whiteout object in the upper layer did not exist before
+     the rename
+ - Verified that the new tests fail on a kernel which lacks the fix from
+   patch 2/5
+
+v5:
+ - Erratum: Clarify that this is about mknod(2) only
+ - Add Cc stable@vger.kernel.org and Depends-on lines
+ - Smaller code changes
+   - Use dev_t where appropriate
+   - Introduce get_dentry_access() helper
+   - Use get_mode_access(S_IFCHR | WHITEOUT_MODE, WHITEOUT_DEV)
+     to calculate the required access right for the created whiteout object
+ - Tests:
+   - rename_whiteout_denied: move a FIFO
+     - otherwise, the test succeeded without the change
+   - make_whiteout: drop set_cap(CAP_MKNOD) (not needed)
+ - This is an intermediary state: It incorporates feedback to 2/5 and some 3/5
+   feedback from v4, but not the 4/5 feedback yet.
+ - https://lore.kernel.org/all/20260731154353.1790268-1-gnoack@google.com/
+
+v4:
+ - Guard it with LANDLOCK_ACCESS_FS_MAKE_REG as discussed.
+ - Selftests and documentation.
+ - https://lore.kernel.org/all/20260724161004.2360749-1-gnoack@google.com/
+
+v3:
+ - Do LANDLOCK_ACCESS_FS_MAKE_WHITEOUT check as part of
+   current_check_refer_path().
+ - https://lore.kernel.org/all/20260610092318.3868884-1-gnoack@google.com/
+
+v2:
+ - Introduce LANDLOCK_ACCESS_FS_MAKE_WHITEOUT access right
+   and guard it with that.
+ - Bump ABI version
+ - https://lore.kernel.org/all/20260513160552.4022649-1-gnoack@google.com/
+
+v1:
+ - initial version
+   https://lore.kernel.org/all/20260411090944.3131168-2-gnoack@google.com/
+
+
+Günther Noack (5):
+  selftests/landlock: Use an actual chardev for MAKE_CHAR audit test
+  landlock: Require LANDLOCK_ACCESS_FS_MAKE_REG for whiteout creation
+  selftests/landlock: Add tests for whiteout object creation
+  selftests/landlock: Test whiteout object behaviour in OverlayFS
+    renames
+  landlock: Link the erratum documentation for whiteout objects
+
+ Documentation/userspace-api/landlock.rst   |  3 +
+ include/uapi/linux/landlock.h              |  1 +
+ security/landlock/errata/abi-1.h           | 23 ++++++++
+ security/landlock/fs.c                     | 41 ++++++++++---
+ tools/testing/selftests/landlock/fs_test.c | 68 +++++++++++++++++++++-
+ 5 files changed, 126 insertions(+), 10 deletions(-)
+
+Range-diff against v4:
+1:  119b5b4b2fb6 = 1:  d1a8a84d92e0 selftests/landlock: Use an actual chardev for MAKE_CHAR audit test
+2:  3203d5da06e3 ! 2:  9fe2edf17413 landlock: Require LANDLOCK_ACCESS_FS_MAKE_REG for whiteout creation
+    @@ Metadata
+      ## Commit message ##
+         landlock: Require LANDLOCK_ACCESS_FS_MAKE_REG for whiteout creation
+     
+    -    Whiteout files are used in the upper layer of an Overlayfs to indicate
+    -    that the file with this name does not exist in the unified view, even
+    -    if it is present in one of the lower layer file systems.
+    +    Whiteout objects are used in the upper layer of an OverlayFS to
+    +    indicate that the file with this name does not exist in the unified
+    +    view, even if it is present in one of the lower layer file systems.
+     
+    -    For userspace implementations of Overlay file systems (fuse-overlayfs),
+    -    whiteout files can be created from userspace as well:
+    +    For the userspace implementations of OverlayFS (fuse-overlayfs),
+    +    whiteout objects can be created from userspace as well:
+     
+         * mknod(2) with S_IFCHR and makedev(0, 0)
+         * renameat2(2) with RENAME_WHITEOUT,
+           creating the whiteout in the old place of the moved file.
+     
+         This commit guards whiteout creation in both of these cases with
+    -    LANDLOCK_ACCESS_FS_MAKE_REG.  Whiteout files are *not* considered
+    +    LANDLOCK_ACCESS_FS_MAKE_REG.  Whiteout objects are *not* considered
+         character devices and are not bound to a driver.
+     
+    -    Before this commit, renameat2(2) with RENAME_WHITEOUT would create a
+    -    directory entry even when all LANDLOCK_ACCESS_FS_MAKE_* rights are
+    -    denied.
+    +    For the mknod(2) case, introduce a Landlock erratum.  The creation of
+    +    whiteout objects through mknod(2) was previously guarded using
+    +    LANDLOCK_ACCESS_FS_MAKE_CHAR, and it is now guarded using
+    +    LANDLOCK_ACCESS_MAKE_REG.
+    +
+    +    For the renameat2(2) case, fix a bug: Before this commit, renameat2(2)
+    +    with RENAME_WHITEOUT would create a directory entry even when all
+    +    LANDLOCK_ACCESS_FS_MAKE_* rights were denied.
+     
+         This does not affect normal renames within layered OverlayFS mounts:
+         When doing a regular rename() on a mounted fuse-overlayfs, it is the
+         fuse-overlayfs daemon that exercises renameat2() with RENAME_WHITEOUT,
+         and only the Landlock domain of that daemon is checked there.
+     
+    -    This also adds a Landlock erratum for that case.
+    -
+         Suggested-by: Christian Brauner <brauner@kernel.org>
+         Suggested-by: Mickaël Salaün <mic@digikod.net>
+    +    Cc: stable@vger.kernel.org
+         Fixes: cb2c7d1a1776 ("landlock: Support filesystem access-control")
+    +    Depends-on: 49c9e09d9610 ("landlock: Fix handling of disconnected directories")
+    +    Depends-on: fe72ce6710cb ("landlock: Add errata documentation section")
+         Signed-off-by: Günther Noack <gnoack@google.com>
+     
+      ## include/uapi/linux/landlock.h ##
+    @@ security/landlock/errata/abi-1.h
+     + * Erratum 4: Creation of whiteout objects
+     + * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     + *
+    -+ * This fix addresses an issue through which it was possible to create whiteout
+    -+ * objects, even when all file creation is restricted using Landlock.
+    ++ * This fix changes the access rights required for the creation of whiteout
+    ++ * objects through :manpage:`mknod(2)` or :manpage:`renameat2(2)`.  Creating
+    ++ * whiteout objects is now guarded by ``LANDLOCK_ACCESS_FS_MAKE_REG`` instead of
+    ++ * ``LANDLOCK_ACCESS_FS_MAKE_CHAR``.
+     + *
+    -+ * With this fix, the creation of whiteout objects is now guarded using
+    -+ * ``LANDLOCK_ACCESS_FS_MAKE_REG``, both when it is done through
+    -+ * :manpage:`renameat2(2)` with `RENAME_WHITEOUT`, and when it is done through
+    -+ * :manpage:`mknod(2)` with ``S_IFCHR`` and ``makedev(0, 0)`` (which previously
+    -+ * required ``LANDLOCK_ACCESS_FS_MAKE_CHAR``).
+    -+ *
+    -+ * Whiteout objects are special file types used in OverlayFS to mark the absence
+    -+ * of a file in an upper file system, even when the lower (often read-only) file
+    -+ * system does have a file with the same name.
+    ++ * Whiteout objects are used in OverlayFS to mark the absence of a file in an
+    ++ * upper file system.  Despite being created with ``S_IFCHR``, whiteout objects
+    ++ * do not count as character devices.
+     + *
+     + * Impact:
+     + *
+    -+ * Without this fix, it was possible to create whiteout files from userspace
+    -+ * using :manpage:`renameat2(2)` with the ``RENAME_WHITEOUT`` flag.
+    ++ * Sandboxed programs that create OverlayFS whiteouts (such as fuse-overlayfs)
+    ++ * now require ``LANDLOCK_ACCESS_FS_MAKE_REG`` instead of
+    ++ * ``LANDLOCK_ACCESS_FS_MAKE_CHAR``.
+     + */
+     +LANDLOCK_ERRATUM(4)
+     
+      ## security/landlock/fs.c ##
+    +@@
+    + #include <linux/falloc.h>
+    + #include <linux/fs.h>
+    + #include <linux/init.h>
+    ++#include <linux/kdev_t.h>
+    + #include <linux/kernel.h>
+    + #include <linux/limits.h>
+    + #include <linux/list.h>
+     @@ security/landlock/fs.c: static int current_check_access_path(const struct path *const path,
+      	return -EACCES;
+      }
+      
+     -static __attribute_const__ access_mask_t get_mode_access(const umode_t mode)
+     +static __attribute_const__ access_mask_t get_mode_access(const umode_t mode,
+    -+							 const unsigned int dev)
+    ++							 const dev_t dev)
+      {
+      	switch (mode & S_IFMT) {
+      	case S_IFLNK:
+    @@ security/landlock/fs.c: static __attribute_const__ access_mask_t get_mode_access
+      		return LANDLOCK_ACCESS_FS_MAKE_CHAR;
+      	case S_IFBLK:
+      		return LANDLOCK_ACCESS_FS_MAKE_BLOCK;
+    +@@ security/landlock/fs.c: static __attribute_const__ access_mask_t get_mode_access(const umode_t mode)
+    + 	}
+    + }
+    + 
+    ++static __attribute_const__ access_mask_t
+    ++get_dentry_access(const struct dentry *const dentry)
+    ++{
+    ++	return get_mode_access(d_backing_inode(dentry)->i_mode,
+    ++			       d_backing_inode(dentry)->i_rdev);
+    ++}
+    ++
+    + static access_mask_t maybe_remove(const struct dentry *const dentry)
+    + {
+    + 	if (d_is_negative(dentry))
+     @@ security/landlock/fs.c: static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
+       * @new_dentry: Destination file or directory.
+       * @removable: Sets to true if it is a rename operation.
+    @@ security/landlock/fs.c: static bool collect_domain_accesses(const struct landloc
+      	const struct landlock_cred_security *const subject =
+      		landlock_get_applicable_subject(current_cred(), any_fs, NULL);
+     @@ security/landlock/fs.c: static int current_check_refer_path(struct dentry *const old_dentry,
+    + 	if (exchange) {
+      		if (unlikely(d_is_negative(new_dentry)))
+      			return -ENOENT;
+    - 		access_request_parent1 =
+    +-		access_request_parent1 =
+     -			get_mode_access(d_backing_inode(new_dentry)->i_mode);
+    -+			get_mode_access(d_backing_inode(new_dentry)->i_mode,
+    -+					d_backing_inode(new_dentry)->i_rdev);
+    ++		access_request_parent1 = get_dentry_access(new_dentry);
+      	} else {
+      		access_request_parent1 = 0;
+      	}
+    - 	access_request_parent2 =
+    +-	access_request_parent2 =
+     -		get_mode_access(d_backing_inode(old_dentry)->i_mode);
+    -+		get_mode_access(d_backing_inode(old_dentry)->i_mode,
+    -+				d_backing_inode(old_dentry)->i_rdev);
+    ++	access_request_parent2 = get_dentry_access(old_dentry);
+      	if (removable) {
+      		access_request_parent1 |= maybe_remove(old_dentry);
+      		access_request_parent2 |= maybe_remove(new_dentry);
+    @@ security/landlock/fs.c: static int current_check_refer_path(struct dentry *const
+     +	 * right there.
+     +	 */
+     +	if (whiteout)
+    -+		access_request_parent1 |= LANDLOCK_ACCESS_FS_MAKE_REG;
+    ++		access_request_parent1 |=
+    ++			get_mode_access(S_IFCHR | WHITEOUT_MODE, WHITEOUT_DEV);
+     +
+      	/* The mount points are the same for old and new paths, cf. EXDEV. */
+      	if (old_dentry->d_parent == new_dir->dentry) {
+    @@ security/landlock/fs.c: static int hook_path_mknod(const struct path *const dir,
+      			   const unsigned int dev)
+      {
+     -	return current_check_access_path(dir, get_mode_access(mode));
+    -+	return current_check_access_path(dir, get_mode_access(mode, dev));
+    ++	return current_check_access_path(
+    ++		dir, get_mode_access(mode, new_decode_dev(dev)));
+      }
+      
+      static int hook_path_symlink(const struct path *const dir,
+3:  98f783636d6b ! 3:  d23ea62b3325 selftests/landlock: Add tests for whiteout object creation
+    @@ tools/testing/selftests/landlock/fs_test.c: TEST_F_FORK(layout1, rename_file)
+      
+     +TEST_F_FORK(layout1, rename_whiteout_denied)
+     +{
+    ++	/* The affected file is a FIFO. */
+    ++	ASSERT_EQ(0, unlink(file1_s3d3));
+    ++	ASSERT_EQ(0, mknod(file1_s3d3, S_IFIFO | 0600, 0));
+    ++
+    ++	/* Deny MAKE_REG, but allow MAKE_FIFO. */
+     +	enforce_fs(_metadata, LANDLOCK_ACCESS_FS_MAKE_REG, NULL);
+     +
+     +	/*
+     +	 * Try to rename a file with RENAME_WHITEOUT.
+     +	 * file1_s3d3 is in dir_s3d2 (tmpfs), so it supports RENAME_WHITEOUT.
+    ++	 * Denied, because whiteout creation is guarded with MAKE_REG.
+     +	 */
+     +	EXPECT_EQ(-1, renameat2(AT_FDCWD, file1_s3d3, AT_FDCWD,
+     +				TMP_DIR "/s3d1/s3d2/s3d3/f2", RENAME_WHITEOUT));
+    @@ tools/testing/selftests/landlock/fs_test.c: TEST_F_FORK(layout1, make_char)
+     +TEST_F_FORK(layout1, make_whiteout)
+     +{
+     +	/* Creates a whiteout object (creation guarded by MAKE_REG). */
+    -+	set_cap(_metadata, CAP_MKNOD);
+     +	test_make_file(_metadata, LANDLOCK_ACCESS_FS_MAKE_REG, S_IFCHR,
+     +		       makedev(0, 0));
+     +}
+    @@ tools/testing/selftests/landlock/fs_test.c: TEST_F_FORK(layout1, make_char)
+      TEST_F_FORK(layout1, make_block)
+      {
+      	/* Creates a /dev/loop0 device. */
+    -@@ tools/testing/selftests/landlock/fs_test.c: TEST_F_FORK(layout2_overlay, same_content_different_file)
+    - 	}
+    - }
+    - 
+    -+
+    - FIXTURE(layout3_fs)
+    - {
+    - 	bool has_created_dir;
+4:  98aab13d9f3f ! 4:  10ed1d74636d selftests/landlock: Test whiteout object behaviour in OverlayFS renames
+    @@ Commit message
+         selftests/landlock: Test whiteout object behaviour in OverlayFS renames
+     
+         Even though OverlayFS uses vfs_rename() with RENAME_WHITEOUT, and even
+    -    though RENAME_WHITEOUT requires LANDLOCK_ACCESS_FS_MAKE_REG, a process that
+    -    renames non-regular files in an OverlayFS can do so without having the
+    -    LANDLOCK_ACCESS_FS_MAKE_REG right in that location.
+    +    though RENAME_WHITEOUT requires LANDLOCK_ACCESS_FS_MAKE_REG, a process
+    +    that renames non-regular files in an OverlayFS can do so without
+    +    having the LANDLOCK_ACCESS_FS_MAKE_REG right in that location.
+     
+    -    This works, and is supposed to work, because OverlayFS uses the credentials
+    -    determined at mount time for the internal vfs_rename() operation. -- The
+    -    rename happens with the credentials of the user who mounted the OverlayFS.
+    +    This works, and is supposed to work, because OverlayFS uses the
+    +    credentials determined at mount time for the internal vfs_rename()
+    +    operation.  The rename happens with the credentials of the user who
+    +    mounted the OverlayFS.
+     
+         Signed-off-by: Günther Noack <gnoack@google.com>
+     
+    @@ tools/testing/selftests/landlock/fs_test.c: TEST_F_FORK(layout2_overlay, same_co
+     +	EXPECT_TRUE(S_ISCHR(st.st_mode));
+     +	EXPECT_EQ(0, st.st_rdev);
+     +}
+    - 
+    ++
+      FIXTURE(layout3_fs)
+      {
+    + 	bool has_created_dir;
+5:  d79f3daff3ed = 5:  35651219395c landlock: Link the erratum documentation for whiteout objects
+-- 
+2.55.0.508.g3f0d502094-goog
+
