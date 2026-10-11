@@ -70,6 +70,7 @@ void __start_tty(struct tty_struct *tty);
 void tty_write_unlock(struct tty_struct *tty);
 int tty_write_lock(struct tty_struct *tty, bool ndelay);
 void tty_vhangup_session(struct tty_struct *tty);
+extern bool tty_legacy_implicit_ctty;
 void tty_open_proc_set_tty(struct file *filp, struct tty_struct *tty);
 int tty_signal_session_leader(struct tty_struct *tty, int exit_session);
 void session_clear_tty(struct pid *session);

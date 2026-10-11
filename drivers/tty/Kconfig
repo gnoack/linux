@@ -166,6 +166,26 @@ config LEGACY_TIOCSTI
 	  dev.tty.legacy_tiocsti sysctl. This configuration option sets
 	  the default value of the sysctl.
 
+config LEGACY_IMPLICIT_CTTY
+	bool "Acquire controlling terminals implicitly on open"
+	default y
+	help
+	  Historically, a session leader without a controlling terminal
+	  acquires one implicitly when it opens a terminal device without
+	  O_NOCTTY.  Daemons that open terminals by accident can then be
+	  signalled or hung up through that terminal.  Programs that
+	  want a controlling terminal can request it explicitly with
+	  the TIOCSCTTY ioctl, which is also what BSD systems require.
+
+	  Say Y here unless you have confirmed that your system's
+	  userspace does not depend on this functionality.  While it is
+	  disabled, the kernel logs each open that would have acquired a
+	  controlling terminal, so that programs that break can be found.
+
+	  This functionality can be changed at runtime with the
+	  dev.tty.legacy_implicit_ctty sysctl. This configuration option
+	  sets the default value of the sysctl.
+
 config LDISC_AUTOLOAD
 	bool "Automatically load TTY Line Disciplines"
 	default y

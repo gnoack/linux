@@ -128,9 +128,16 @@ static void proc_set_tty(struct tty_struct *tty)
 
 /*
  * Called by tty_open() to set the controlling tty if applicable.
+ *
+ * Unless dev.tty.legacy_implicit_ctty is set, the tty is not acquired, and
+ * userspace has to use TIOCSCTTY instead.  The refusal is logged, so that
+ * programs which break because of it can be found.
  */
 void tty_open_proc_set_tty(struct file *filp, struct tty_struct *tty)
 {
+	bool legacy = READ_ONCE(tty_legacy_implicit_ctty);
+	bool refused = false;
+
 	read_lock(&tasklist_lock);
 	spin_lock_irq(&current->sighand->siglock);
 	if (current->signal->leader &&
@@ -150,11 +157,20 @@ void tty_open_proc_set_tty(struct file *filp, struct tty_struct *tty)
 		 * necessary to also permit this if
 		 * inode_permission(inode, MAY_READ) == 0.
 		 */
-		if (filp->f_mode & FMODE_READ)
-			__proc_set_tty(tty);
+		if (filp->f_mode & FMODE_READ) {
+			if (legacy)
+				__proc_set_tty(tty);
+			else
+				refused = true;
+		}
 	}
 	spin_unlock_irq(&current->sighand->siglock);
 	read_unlock(&tasklist_lock);
+
+	if (refused)
+		tty_info_ratelimited(tty,
+			"%s[%d] did not acquire controlling tty on open, use TIOCSCTTY (dev.tty.legacy_implicit_ctty=0)\n",
+			current->comm, task_pid_nr(current));
 }
 
 struct tty_struct *get_current_tty(void)

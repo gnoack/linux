@@ -2231,6 +2231,8 @@ static int tty_fasync(int fd, struct file *filp, int on)
 }
 
 static bool tty_legacy_tiocsti __read_mostly = IS_ENABLED(CONFIG_LEGACY_TIOCSTI);
+bool tty_legacy_implicit_ctty __read_mostly =
+	IS_ENABLED(CONFIG_LEGACY_IMPLICIT_CTTY);
 /**
  * tiocsti - fake input character
  * @tty: tty to fake input into
@@ -3623,6 +3625,13 @@ static const struct ctl_table tty_table[] = {
 		.procname	= "legacy_tiocsti",
 		.data		= &tty_legacy_tiocsti,
 		.maxlen		= sizeof(tty_legacy_tiocsti),
+		.mode		= 0644,
+		.proc_handler	= proc_dobool,
+	},
+	{
+		.procname	= "legacy_implicit_ctty",
+		.data		= &tty_legacy_implicit_ctty,
+		.maxlen		= sizeof(tty_legacy_implicit_ctty),
 		.mode		= 0644,
 		.proc_handler	= proc_dobool,
 	},
